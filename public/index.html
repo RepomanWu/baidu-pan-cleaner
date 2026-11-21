@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>百度网盘清理助手</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">网盘清理助手 <small>重复文件 / 垃圾视频 / 空文件夹</small></div>
+    <div class="spacer"></div>
+    <div id="jobBadge" class="badge hidden"></div>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <div class="section-title">
+        <span>账号</span>
+        <button id="btnAddAccount" class="link" type="button">+ 添加账号</button>
+      </div>
+      <ul id="accountList" class="account-list"></ul>
+      <div class="hint">
+        每个账号只需扫码授权一次，登录态保存在本机 data/profiles 下。<br />
+        添加多个账号即可在不同网盘账号间切换。
+      </div>
+    </aside>
+
+    <section class="content">
+      <div class="cards" id="cards">
+        <article class="card" data-type="dup">
+          <h3>扫描重复文件</h3>
+          <p>找出内容完全相同的文件，默认每组保留最新的一份，其余可勾选删除。</p>
+          <div class="card-foot">
+            <button class="btn primary" data-scan="dup" type="button">开始扫描</button>
+            <span class="last" data-last="dup"></span>
+          </div>
+        </article>
+        <article class="card" data-type="rub">
+          <h3>扫描垃圾视频</h3>
+          <p>扫描网盘中被判定为垃圾的视频文件，释放存储空间。</p>
+          <div class="card-foot">
+            <button class="btn primary" data-scan="rub" type="button">开始扫描</button>
+            <span class="last" data-last="rub"></span>
+          </div>
+        </article>
+        <article class="card" data-type="empty">
+          <h3>扫描空文件夹</h3>
+          <p>列出不含任何文件的空文件夹，让目录结构更整洁。</p>
+          <div class="card-foot">
+            <button class="btn primary" data-scan="empty" type="button">开始扫描</button>
+            <span class="last" data-last="empty"></span>
+          </div>
+        </article>
+      </div>
+
+      <div id="jobPanel" class="panel hidden">
+        <div class="panel-head">
+          <h2 id="jobTitle">任务进行中</h2>
+          <div class="spacer"></div>
+          <span id="jobPercent" class="chip">0%</span>
+        </div>
+        <div class="progress"><i id="jobBar"></i></div>
+        <div class="job-text" id="jobText"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>扫描结果</h2>
+          <div class="spacer"></div>
+          <button id="btnSelectSuggested" class="btn sm ghost" type="button">按建议勾选</button>
+          <button id="btnSelectNone" class="btn sm ghost" type="button">全不选</button>
+          <button id="btnDownloadCsv" class="btn sm ghost" type="button">导出 CSV</button>
+          <button id="btnDownloadJson" class="btn sm ghost" type="button">导出 JSON</button>
+          <button id="btnDelete" class="btn sm danger" type="button" disabled>删除选中</button>
+        </div>
+        <div id="reportMeta" class="meta">还没有结果，先在左侧选择账号并点击「开始扫描」。</div>
+        <div id="resultArea" class="results"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>历史报告</h2>
+          <div class="spacer"></div>
+          <span class="chip" id="reportCount">0</span>
+        </div>
+        <div id="reportList"></div>
+      </div>
+    </section>
+  </main>
+
+  <div id="modalRoot"></div>
+  <div id="toast" class="toast"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

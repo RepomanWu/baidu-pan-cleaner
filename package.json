@@ -1,0 +1,13 @@
+{
+  "name": "bdpan-clean",
+  "version": "1.0.0",
+  "private": true,
+  "description": "百度网盘重复文件 / 垃圾视频 / 空文件夹 扫描清理工具（扫码授权，多账号）",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "playwright-core": "^1.56.1"
+  }
+}
