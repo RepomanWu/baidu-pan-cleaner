@@ -72,3 +72,7 @@ bdpan-clean/
 ## 说明
 
 工具调用的是网页版清理功能自身的接口：`/api/garbagescan`、`/api/garbagetaskquery`、`/api/garbagelist`、`/api/garbagedelete`。如果百度调整了接口，页面上的功能也可能同步变化，届时需要更新 `core/pan.js`。
+
+## License
+
+[MIT](./LICENSE) © 2026 RepomanWu
