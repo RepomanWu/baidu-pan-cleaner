@@ -55,4 +55,15 @@ function list() {
   return [...jobs.values()].sort((a, b) => b.createdAt - a.createdAt).slice(0, 20).map((j) => get(j.id));
 }
 
-module.exports = { create, update, get, list };
+function cancelRunning(kind, accountId) {
+  let count = 0;
+  for (const job of jobs.values()) {
+    if (job.kind === kind && job.status === 'running' && job.accountId === accountId) {
+      job.cancelled = true;
+      count++;
+    }
+  }
+  return count;
+}
+
+module.exports = { create, update, get, list, cancelRunning };
