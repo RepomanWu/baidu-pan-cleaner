@@ -145,6 +145,24 @@ function deletedPathsFor(accountId) {
   return new Set(Object.keys(bucket));
 }
 
+function protectLastCopies(report) {
+  if (!report || report.type !== 'dup') return report;
+  const protectedPaths = new Set();
+  for (const group of report.groups || []) {
+    const alive = (group.files || []).filter((file) => !file.deleted);
+    for (const file of group.files || []) {
+      if (!file.deleted && alive.length <= 1) {
+        file.protected = true;
+        protectedPaths.add(file.path);
+      } else {
+        delete file.protected;
+      }
+    }
+  }
+  report.suggested = (report.suggested || []).filter((filePath) => !protectedPaths.has(filePath));
+  return report;
+}
+
 function markReportDeleted(reportId, paths) {
   const report = getReport(reportId);
   if (!report || !Array.isArray(paths) || !paths.length) return null;
@@ -162,6 +180,7 @@ function markReportDeleted(reportId, paths) {
     (report.files || []).forEach(apply);
   }
   report.suggested = (report.suggested || []).filter((filePath) => !deleted.has(filePath));
+  protectLastCopies(report);
   saveReport(report);
   return report;
 }
@@ -181,4 +200,5 @@ module.exports = {
   markDeleted,
   deletedPathsFor,
   markReportDeleted,
+  protectLastCopies,
 };
