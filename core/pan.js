@@ -45,6 +45,30 @@ function preferredChannel() {
   return 'msedge';
 }
 
+function clearProfileLock(profileDir) {
+  for (const name of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) {
+    try {
+      fs.rmSync(path.join(profileDir, name), { force: true });
+    } catch (e) {}
+  }
+}
+
+function killProfileBrowsers(profileDir) {
+  if (process.platform !== 'win32') return;
+  const escaped = String(profileDir).replace(/'/g, "''");
+  const script =
+    `Get-CimInstance Win32_Process -Filter "Name='msedge.exe' or Name='chrome.exe'" | ` +
+    `Where-Object { $_.CommandLine -like '*${escaped}*' } | ` +
+    `ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`;
+  try {
+    require('child_process').execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      windowsHide: true,
+      stdio: 'ignore',
+      timeout: 15000,
+    });
+  } catch (e) {}
+}
+
 async function launchBrowser(profileDir, { visible = false } = {}) {
   fs.mkdirSync(profileDir, { recursive: true });
   const args = ['--no-first-run', '--no-default-browser-check', '--disable-blink-features=AutomationControlled'];
@@ -53,28 +77,47 @@ async function launchBrowser(profileDir, { visible = false } = {}) {
 
   const preferred = preferredChannel();
   const channels = [preferred, 'msedge', 'chrome'].filter((value, index, list) => value && list.indexOf(value) === index);
-  let lastError = null;
-  for (const channel of channels) {
+
+  const attempt = async () => {
+    let lastError = null;
+    for (const channel of channels) {
+      try {
+        return await withTimeout(
+          chromium.launchPersistentContext(profileDir, {
+            channel,
+            headless: false,
+            viewport: visible ? undefined : { width: 1280, height: 900 },
+            args,
+          }),
+          60000,
+          '启动浏览器超时'
+        );
+      } catch (err) {
+        lastError = err;
+      }
+    }
+    throw lastError || new Error('未知错误');
+  };
+
+  try {
+    return await attempt();
+  } catch (firstError) {
+    // 常见原因：上次授权窗口未关闭 / Chrome 崩溃残留锁，清理后重试一次
+    killProfileBrowsers(profileDir);
+    clearProfileLock(profileDir);
+    await sleep(1200);
     try {
-      return await withTimeout(
-        chromium.launchPersistentContext(profileDir, {
-          channel,
-          headless: false,
-          viewport: visible ? undefined : { width: 1280, height: 900 },
-          args,
-        }),
-        60000,
-        '启动浏览器超时'
-      );
-    } catch (err) {
-      lastError = err;
+      return await attempt();
+    } catch (secondError) {
+      killProfileBrowsers(profileDir);
+      clearProfileLock(profileDir);
+      const message = (secondError && secondError.message) || String(secondError);
+      if (/Target page, context or browser has been closed|已在另一个会话|ProcessSingleton/i.test(message)) {
+        throw new PanError('授权用的浏览器窗口被占用，已自动清理但未能启动，请稍后重试');
+      }
+      throw new PanError(`无法启动浏览器（已尝试 ${channels.join(' / ')}）：${message.slice(0, 300)}`);
     }
   }
-  const lastMessage = lastError ? lastError.message || String(lastError) : '未知错误';
-  if (/另一个会话|ProcessSingleton|SingletonLock|profile.*in use/i.test(lastMessage)) {
-    throw new PanError('浏览器配置目录被占用（可能有残留的授权窗口），请关闭后重试');
-  }
-  throw new PanError(`无法启动浏览器（已尝试 ${channels.join(' / ')}）：${lastMessage}`);
 }
 
 function withTimeout(promise, ms, message) {
