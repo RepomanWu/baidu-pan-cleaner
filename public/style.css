@@ -226,6 +226,17 @@ button { font-family: inherit; cursor: pointer; }
 .row .size { color: var(--muted); width: 86px; text-align: right; flex: 0 0 86px; }
 .row .time { color: var(--muted); width: 140px; flex: 0 0 140px; font-size: 12px; }
 .row input[type="checkbox"] { width: 15px; height: 15px; }
+.row.deleted { background: #fbfbfb; }
+.row.deleted .path { color: var(--muted); text-decoration: line-through; }
+.row.deleted input[type="checkbox"] { opacity: .5; }
+.tag {
+  font-size: 11px;
+  color: var(--ok);
+  background: #e7f7f0;
+  border-radius: 999px;
+  padding: 2px 7px;
+  flex: 0 0 auto;
+}
 
 .report-item {
   display: flex;
