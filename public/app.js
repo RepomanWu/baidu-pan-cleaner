@@ -9,6 +9,7 @@ const state = {
   job: null,
   report: null,
   selected: new Set(),
+  renderedPaths: new Set(),
   reports: [],
   pollTimer: null,
 };
@@ -344,6 +345,7 @@ function renderReports() {
 function clearReport() {
   state.report = null;
   state.selected = new Set();
+  state.renderedPaths = new Set();
   $('#resultArea').innerHTML = '';
   $('#reportMeta').textContent = '还没有选择结果。';
   $('#filterCount').textContent = '';
@@ -411,6 +413,27 @@ function filteredView() {
   }
   const files = (report.files || []).filter((file) => matchFile(file, filters));
   return { groups: [], files, matched: files.length, total: report.summary.count };
+}
+
+function viewPaths(view) {
+  const set = new Set();
+  if (view.groups.length) {
+    for (const group of view.groups) for (const file of group.files) if (file.path) set.add(file.path);
+  } else {
+    for (const file of view.files) if (file.path) set.add(file.path);
+  }
+  return set;
+}
+
+// 删除只作用于当前筛选结果（页面上展示的这批）里已勾选的项
+function selectedInView() {
+  const paths = [];
+  let hidden = 0;
+  for (const filePath of state.selected) {
+    if (state.renderedPaths.has(filePath)) paths.push(filePath);
+    else hidden++;
+  }
+  return { paths, hidden };
 }
 
 function applySort(view, sort) {
@@ -488,6 +511,7 @@ function renderReport() {
   if (!report.summary.count) {
     area.appendChild(el('div', 'empty', '没有扫描到可清理的内容'));
     $('#filterCount').textContent = '';
+    state.renderedPaths = new Set();
     updateDeleteButton();
     return;
   }
@@ -498,6 +522,7 @@ function renderReport() {
     if (!isDup && $('#fSort').value === option.value) $('#fSort').value = '';
   });
   const view = applySort(filteredView(), $('#fSort').value);
+  state.renderedPaths = viewPaths(view);
   $('#filterCount').textContent = `筛选后 ${view.matched} 项 / 共 ${view.total} 项`;
 
   const RENDER_LIMIT = 1500;
@@ -598,11 +623,14 @@ function countDeleted(report) {
 
 function updateDeleteButton() {
   const btn = $('#btnDelete');
-  const count = state.selected.size;
+  const { paths, hidden } = selectedInView();
+  const count = paths.length;
   const hasTask = !!(state.report && state.report.taskid);
   btn.disabled = count === 0 || !state.report || !hasTask;
   btn.textContent = count ? `删除选中（${count}）` : '删除选中';
-  btn.title = hasTask ? '' : '导入的 CSV 报告没有扫描任务 ID，只能查看和导出';
+  if (!hasTask) btn.title = '导入的 CSV 报告没有扫描任务 ID，只能查看和导出';
+  else if (!count && hidden) btn.title = `当前筛选结果中没有勾选的项（另有 ${hidden} 项已勾选但被筛选条件排除）`;
+  else btn.title = '只删除当前筛选结果中已勾选的项';
 }
 
 function selectSuggested() {
@@ -652,17 +680,21 @@ function keepOnePerGroup(report, selectedPaths) {
 
 async function deleteSelected() {
   const report = state.report;
-  if (!report || !state.selected.size) return;
-  const guard = keepOnePerGroup(report, [...state.selected]);
+  if (!report) return;
+  const scope = selectedInView();
+  if (!scope.paths.length) return;
+  const guard = keepOnePerGroup(report, scope.paths);
   if (guard.kept) {
-    state.selected = new Set(guard.paths);
+    const keptPaths = new Set(scope.paths.filter((p) => guard.paths.indexOf(p) === -1));
+    for (const p of keptPaths) state.selected.delete(p);
     refreshCheckboxes();
     toast(`已自动保留 ${guard.kept} 个重复组的最新一份，避免整组删空`);
   }
   const paths = guard.paths;
   if (!paths.length) return;
+  const pathSet = new Set(paths);
   const size = (report.type === 'dup' ? report.groups.flatMap((g) => g.files) : report.files)
-    .filter((f) => state.selected.has(f.path))
+    .filter((f) => pathSet.has(f.path))
     .reduce((sum, f) => sum + (f.size || 0), 0);
 
   let confirmed = false;
@@ -674,6 +706,11 @@ async function deleteSelected() {
         container.appendChild(
           el('p', '', `类型：${report.typeLabel}　数量：${paths.length} 项　占用：${fmtSize(size)}`)
         );
+        if (scope.hidden) {
+          container.appendChild(
+            el('p', 'warn', `另有 ${scope.hidden} 项已勾选但不在当前筛选结果中，本次不会删除。`)
+          );
+        }
         if (report.type === 'empty') {
           container.appendChild(el('p', '', '空文件夹本身不含文件，删除后目录结构会变化。'));
         }
