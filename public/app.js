@@ -429,6 +429,10 @@ function renderReport() {
   );
   const line2 = el('div', '', `账号：${report.accountName}（UID ${report.uk || '-'}）· 扫描时间：${new Date(report.createdAt).toLocaleString('zh-CN')}`);
   meta.append(line1, line2);
+  const deletedCount = countDeleted(report);
+  if (deletedCount) {
+    meta.appendChild(el('div', '', `其中 ${deletedCount} 项已在本地标记为「已删除」，不会再次提交删除。`));
+  }
   if (report.meta && report.meta.totalSize) {
     meta.appendChild(
       el(
@@ -501,18 +505,19 @@ function selectFiltered() {
   if (!state.report) return;
   const view = filteredView();
   const paths = view.groups.length
-    ? view.groups.flatMap((group) => group.files.map((file) => file.path))
-    : view.files.map((file) => file.path);
+    ? view.groups.flatMap((group) => group.files.filter((file) => !file.deleted).map((file) => file.path))
+    : view.files.filter((file) => !file.deleted).map((file) => file.path);
   for (const path of paths) state.selected.add(path);
   refreshCheckboxes();
   toast(`已勾选筛选结果 ${paths.length} 项`);
 }
 
 function renderRow(file) {
-  const row = el('div', 'row');
+  const row = el('div', `row${file.deleted ? ' deleted' : ''}`);
   const box = document.createElement('input');
   box.type = 'checkbox';
-  box.checked = state.selected.has(file.path);
+  box.disabled = !!file.deleted;
+  box.checked = !file.deleted && state.selected.has(file.path);
   box.addEventListener('change', () => {
     if (box.checked) state.selected.add(file.path);
     else state.selected.delete(file.path);
@@ -522,8 +527,16 @@ function renderRow(file) {
   pathNode.title = file.path;
   const sizeNode = el('div', 'size', fmtSize(file.size));
   const timeNode = el('div', 'time', fmtTime(file.mtime));
-  row.append(box, pathNode, sizeNode, timeNode);
+  row.append(box, pathNode);
+  if (file.deleted) row.appendChild(el('span', 'tag', '已删除'));
+  row.append(sizeNode, timeNode);
   return row;
+}
+
+function countDeleted(report) {
+  if (!report) return 0;
+  const files = report.type === 'dup' ? (report.groups || []).flatMap((g) => g.files || []) : report.files || [];
+  return files.filter((file) => file.deleted).length;
 }
 
 function updateDeleteButton() {
