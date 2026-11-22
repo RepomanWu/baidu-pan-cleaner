@@ -5,7 +5,72 @@ const path = require('path');
 const crypto = require('crypto');
 
 const ROOT = path.join(__dirname, '..');
-const DATA_DIR = path.join(ROOT, 'data');
+const PROJECT_DATA_DIR = path.join(ROOT, 'data');
+
+function isWritable(dir) {
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const probe = path.join(dir, `.write-test-${process.pid}`);
+    fs.writeFileSync(probe, 'ok');
+    fs.rmSync(probe, { force: true });
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+// 程序目录不可写时（例如放在受保护/受限目录），把数据放到用户目录，浏览器配置也需要可写
+function resolveDataDir() {
+  if (process.env.BDPAN_DATA_DIR) return path.resolve(process.env.BDPAN_DATA_DIR);
+  const fallback = path.join(
+    process.env.LOCALAPPDATA || process.env.USERPROFILE || ROOT,
+    'bdpan-clean',
+    'data'
+  );
+  if (fs.existsSync(path.join(fallback, '.migrated'))) return fallback;
+  if (isWritable(PROJECT_DATA_DIR)) return PROJECT_DATA_DIR;
+  return fallback;
+}
+
+const DATA_DIR = resolveDataDir();
+process.env.BDPAN_DATA_DIR = DATA_DIR;
+
+function migrateFromProjectData() {
+  if (DATA_DIR === PROJECT_DATA_DIR) return;
+  const marker = path.join(DATA_DIR, '.migrated');
+  if (fs.existsSync(marker)) return;
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    for (const name of ['accounts.json', 'deleted.json', 'config.json', 'reports', 'profiles']) {
+      const source = path.join(PROJECT_DATA_DIR, name);
+      const target = path.join(DATA_DIR, name);
+      if (!fs.existsSync(source) || fs.existsSync(target)) continue;
+      console.log(`[数据迁移] ${source} -> ${target}`);
+      fs.cpSync(source, target, { recursive: true });
+    }
+    // 账号里的配置目录也要指向新位置，否则浏览器仍然打不开
+    const accountFile = path.join(DATA_DIR, 'accounts.json');
+    try {
+      const list = JSON.parse(fs.readFileSync(accountFile, 'utf8').replace(/^\uFEFF/, ''));
+      if (Array.isArray(list)) {
+        let changed = false;
+        for (const account of list) {
+          if (account && typeof account.profileDir === 'string' && account.profileDir.startsWith(PROJECT_DATA_DIR)) {
+            account.profileDir = path.join(DATA_DIR, 'profiles', account.id);
+            changed = true;
+          }
+        }
+        if (changed) fs.writeFileSync(accountFile, JSON.stringify(list, null, 2), 'utf8');
+      }
+    } catch (e) {}
+    fs.writeFileSync(marker, new Date().toISOString(), 'utf8');
+  } catch (e) {
+    console.error(`[数据迁移] 失败：${e.message}`);
+  }
+}
+
+migrateFromProjectData();
+
 const PROFILE_DIR = path.join(DATA_DIR, 'profiles');
 const REPORT_DIR = path.join(DATA_DIR, 'reports');
 const ACCOUNT_FILE = path.join(DATA_DIR, 'accounts.json');
