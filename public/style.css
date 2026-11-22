@@ -195,6 +195,7 @@ button { font-family: inherit; cursor: pointer; }
 .filters input[type="number"] { width: 92px; }
 .filters input[type="date"] { width: 132px; }
 .filters select { width: 96px; }
+.filters select.sort-select { width: 148px; }
 .filter-count { color: var(--muted); font-size: 12px; margin-left: auto; }
 
 .results { max-height: 560px; overflow: auto; border: 1px solid var(--line); border-radius: 10px; }
