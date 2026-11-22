@@ -47,16 +47,20 @@ function sendJSON(res, status, data) {
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
-    let raw = '';
+    const chunks = [];
+    let size = 0;
     req.on('data', (chunk) => {
-      raw += chunk;
-      if (raw.length > 5 * 1024 * 1024) {
+      chunks.push(chunk);
+      size += chunk.length;
+      if (size > 20 * 1024 * 1024) {
         reject(new Error('请求体过大'));
         req.destroy();
       }
     });
     req.on('end', () => {
-      if (!raw) return resolve({});
+      if (!chunks.length) return resolve({});
+      // 必须整体按 UTF-8 解码，逐块转字符串会把跨块的中文截断成乱码
+      const raw = Buffer.concat(chunks).toString('utf8');
       try {
         resolve(JSON.parse(raw));
       } catch (e) {
@@ -293,7 +297,11 @@ async function handleApi(req, res, url) {
     const paths = (Array.isArray(body.paths) ? body.paths : []).filter((p) => typeof p === 'string');
     if (!paths.length) return sendJSON(res, 400, { error: '没有选择要删除的文件' });
     const illegal = paths.filter((p) => !allowed.has(p));
-    if (illegal.length) return sendJSON(res, 400, { error: '存在不在报告中的路径，已拒绝执行' });
+    if (illegal.length) {
+      return sendJSON(res, 400, {
+        error: `有 ${illegal.length} 个路径不在当前报告中（报告可能已过期或被重新扫描），请重新打开报告后再试`,
+      });
+    }
 
     const job = startJob('delete', { accountId: account.id, type: report.type }, (j) =>
       runDelete(account, report, paths, j)
