@@ -37,12 +37,30 @@ function errorText(errno) {
 
 function preferredChannel() {
   if (process.env.PAN_BROWSER) return String(process.env.PAN_BROWSER);
+  const cfg = readConfig();
+  if (cfg.browser) return String(cfg.browser);
+  return 'msedge';
+}
+
+function readConfig() {
   try {
     const file = path.join(__dirname, '..', 'data', 'config.json');
     const cfg = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
-    if (cfg && cfg.browser) return String(cfg.browser);
-  } catch (e) {}
-  return 'msedge';
+    return cfg && typeof cfg === 'object' ? cfg : {};
+  } catch (e) {
+    return {};
+  }
+}
+
+// 百度风控：一次删太多会触发验证，默认每批 10 个、批间稍作停顿
+function deleteBatchOptions() {
+  const cfg = readConfig();
+  const batch = Number(process.env.DELETE_BATCH || cfg.deleteBatch) || 10;
+  const delay = Number(process.env.DELETE_DELAY || cfg.deleteDelay);
+  return {
+    batchSize: Math.max(1, Math.min(50, Math.floor(batch))),
+    delayMs: Number.isFinite(delay) && delay >= 0 ? delay : 1200,
+  };
 }
 
 function clearProfileLock(profileDir) {
@@ -368,15 +386,15 @@ class Session {
   }
 
   async deleteViaFileManager(paths, onProgress) {
-    const chunkSize = 200;
+    const { batchSize, delayMs } = deleteBatchOptions();
     let deleted = 0;
     let failed = 0;
     const deletedPaths = [];
-    for (let i = 0; i < paths.length; i += chunkSize) {
-      const chunk = paths.slice(i, i + chunkSize);
-      const query = `async=2&onnest=fail&opera=delete&newVerify=1&clienttype=0&app_id=250528&web=1&bdstoken=${encodeURIComponent(
-        this.bdstoken || ''
-      )}`;
+    const query = `async=2&onnest=fail&opera=delete&newVerify=1&clienttype=0&app_id=250528&web=1&bdstoken=${encodeURIComponent(
+      this.bdstoken || ''
+    )}`;
+    for (let i = 0; i < paths.length; i += batchSize) {
+      const chunk = paths.slice(i, i + batchSize);
       let res;
       try {
         res = await this.api(`/api/filemanager?${query}`, {
@@ -385,8 +403,20 @@ class Session {
         });
       } catch (err) {
         if (err.code === 132) {
+          // 已删掉一部分时不再整体报错，把进度交给上层记录，剩余部分验证后重试
+          if (deleted) {
+            return {
+              deleted,
+              failed: paths.length - deleted,
+              method: 'filemanager',
+              deletedPaths,
+              verifyNeeded: true,
+              remaining: paths.length - deleted,
+            };
+          }
           const verifyError = new PanError(
-            '百度要求完成身份验证：已为你打开网盘页面，请在页面里手动删除任意一个文件并按其提示完成验证，然后回到工具重试'
+            '百度要求完成身份验证：已为你打开网盘页面，请在页面里手动删除任意一个文件并按其提示完成验证，然后回到工具重试',
+            132
           );
           verifyError.verifyNeeded = true;
           throw verifyError;
@@ -406,13 +436,22 @@ class Session {
         }
         if (status !== 'success') {
           failed += chunk.length;
-          continue;
+        } else {
+          deleted += chunk.length;
+          deletedPaths.push(...chunk);
         }
+      } else {
+        deleted += chunk.length;
+        deletedPaths.push(...chunk);
       }
-      deleted += chunk.length;
-      deletedPaths.push(...chunk);
       onProgress &&
-        onProgress({ status: 'running', progress: Math.round((deleted / paths.length) * 100), method: 'filemanager' });
+        onProgress({
+          status: 'running',
+          progress: Math.round((deleted / paths.length) * 100),
+          method: 'filemanager',
+          message: `已删除 ${deleted} / ${paths.length} 项`,
+        });
+      if (i + batchSize < paths.length) await sleep(delayMs + Math.round(Math.random() * 800));
     }
     if (!deleted && failed) throw new PanError('删除失败，请稍后重试或在网页版手动删除');
     if (failed && onProgress) onProgress({ status: 'running', progress: 100, message: `有 ${failed} 项删除失败` });
