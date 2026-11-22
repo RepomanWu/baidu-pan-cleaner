@@ -399,7 +399,12 @@ function filteredView() {
       if (filters.groupMin && group.files.length < filters.groupMin) continue;
       const files = group.files.filter((file) => matchFile(file, filters));
       if (!files.length) continue;
-      groups.push({ group: group.group, files, total: group.files.length });
+      groups.push({
+        group: group.group,
+        files,
+        total: group.files.length,
+        alive: (group.files || []).filter((file) => !file.deleted).length,
+      });
       matched += files.length;
     }
     return { groups, files: [], matched, total: report.summary.count };
@@ -412,11 +417,32 @@ function applySort(view, sort) {
   return window.PanSorter.applySort(view, sort, state.report ? state.report.type : '');
 }
 
+// 重复组内只剩一份副本时打上保护标记，禁止勾选删除，避免整组被删空
+function applyProtection(report) {
+  if (!report || report.type !== 'dup') return 0;
+  let count = 0;
+  for (const group of report.groups || []) {
+    const alive = (group.files || []).filter((file) => !file.deleted);
+    for (const file of group.files || []) {
+      if (!file.deleted && alive.length <= 1) {
+        file.protected = true;
+        count++;
+        state.selected.delete(file.path);
+      } else {
+        delete file.protected;
+      }
+    }
+  }
+  return count;
+}
+
 function renderReport() {
   const report = state.report;
   const area = $('#resultArea');
   area.innerHTML = '';
   if (!report) return clearReport();
+
+  const protectedCount = applyProtection(report);
 
   const meta = $('#reportMeta');
   meta.innerHTML = '';
@@ -432,6 +458,11 @@ function renderReport() {
   const deletedCount = countDeleted(report);
   if (deletedCount) {
     meta.appendChild(el('div', '', `其中 ${deletedCount} 项已在本地标记为「已删除」，不会再次提交删除。`));
+  }
+  if (protectedCount) {
+    meta.appendChild(
+      el('div', 'warn', `有 ${protectedCount} 个文件是所在重复组的最后一个副本，已自动保护、不可勾选删除。`)
+    );
   }
   if (report.meta && report.meta.totalSize) {
     meta.appendChild(
@@ -474,7 +505,11 @@ function renderReport() {
   if (report.type === 'dup') {
     for (const group of view.groups) {
       if (rendered >= RENDER_LIMIT) break;
-      area.appendChild(el('div', 'group-head', `重复组 ${group.group} · 匹配 ${group.files.length} / 共 ${group.total} 个文件`));
+      const groupHead =
+        group.alive <= 1
+          ? `重复组 ${group.group} · 仅剩 ${group.alive} 个副本（已保护，不可删除）· 匹配 ${group.files.length} / 共 ${group.total} 个文件`
+          : `重复组 ${group.group} · 匹配 ${group.files.length} / 共 ${group.total} 个文件`;
+      area.appendChild(el('div', `group-head${group.alive <= 1 ? ' protected' : ''}`, groupHead));
       for (const file of group.files) {
         if (rendered >= RENDER_LIMIT) break;
         area.appendChild(renderRow(file));
@@ -505,19 +540,22 @@ function selectFiltered() {
   if (!state.report) return;
   const view = filteredView();
   const paths = view.groups.length
-    ? view.groups.flatMap((group) => group.files.filter((file) => !file.deleted).map((file) => file.path))
-    : view.files.filter((file) => !file.deleted).map((file) => file.path);
+    ? view.groups.flatMap((group) =>
+        group.files.filter((file) => !file.deleted && !file.protected).map((file) => file.path)
+      )
+    : view.files.filter((file) => !file.deleted && !file.protected).map((file) => file.path);
   for (const path of paths) state.selected.add(path);
   refreshCheckboxes();
   toast(`已勾选筛选结果 ${paths.length} 项`);
 }
 
 function renderRow(file) {
-  const row = el('div', `row${file.deleted ? ' deleted' : ''}`);
+  const row = el('div', `row${file.deleted ? ' deleted' : ''}${file.protected ? ' protected' : ''}`);
   const box = document.createElement('input');
   box.type = 'checkbox';
-  box.disabled = !!file.deleted;
-  box.checked = !file.deleted && state.selected.has(file.path);
+  box.disabled = !!file.deleted || !!file.protected;
+  box.checked = !file.deleted && !file.protected && state.selected.has(file.path);
+  box.title = file.protected ? '所在重复组只剩这一份副本，已保护，不能删除' : '';
   box.addEventListener('change', () => {
     if (box.checked) state.selected.add(file.path);
     else state.selected.delete(file.path);
@@ -529,6 +567,7 @@ function renderRow(file) {
   const timeNode = el('div', 'time', fmtTime(file.mtime));
   row.append(box, pathNode);
   if (file.deleted) row.appendChild(el('span', 'tag', '已删除'));
+  else if (file.protected) row.appendChild(el('span', 'tag warn', '最后一份'));
   row.append(sizeNode, timeNode);
   return row;
 }
@@ -576,10 +615,34 @@ function reportFromCsv(text, account) {
 
 /* ---------- 删除 ---------- */
 
+// 勾选整个重复组时保留最新一份，避免整组被删空
+function keepOnePerGroup(report, selectedPaths) {
+  const selected = new Set(selectedPaths);
+  if (!report || report.type !== 'dup') return { paths: [...selected], kept: 0 };
+  let kept = 0;
+  for (const group of report.groups || []) {
+    const alive = (group.files || []).filter((file) => !file.deleted);
+    if (alive.length <= 1) continue;
+    const chosen = alive.filter((file) => selected.has(file.path));
+    if (chosen.length < alive.length) continue;
+    const newest = alive.reduce((a, b) => ((b.mtime || 0) > (a.mtime || 0) ? b : a), alive[0]);
+    selected.delete(newest.path);
+    kept++;
+  }
+  return { paths: [...selected], kept };
+}
+
 async function deleteSelected() {
   const report = state.report;
   if (!report || !state.selected.size) return;
-  const paths = [...state.selected];
+  const guard = keepOnePerGroup(report, [...state.selected]);
+  if (guard.kept) {
+    state.selected = new Set(guard.paths);
+    refreshCheckboxes();
+    toast(`已自动保留 ${guard.kept} 个重复组的最新一份，避免整组删空`);
+  }
+  const paths = guard.paths;
+  if (!paths.length) return;
   const size = (report.type === 'dup' ? report.groups.flatMap((g) => g.files) : report.files)
     .filter((f) => state.selected.has(f.path))
     .reduce((sum, f) => sum + (f.size || 0), 0);
