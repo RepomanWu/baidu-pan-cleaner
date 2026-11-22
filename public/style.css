@@ -167,6 +167,36 @@ button { font-family: inherit; cursor: pointer; }
 
 .meta { color: var(--muted); font-size: 13px; margin-bottom: 10px; line-height: 1.7; }
 
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 10px;
+  margin-bottom: 10px;
+  background: #f8faff;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.filters input,
+.filters select {
+  height: 30px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  font-size: 12px;
+  font-family: inherit;
+  background: #fff;
+  outline: none;
+}
+.filters input:focus,
+.filters select:focus { border-color: var(--accent); }
+.filters input[type="search"] { width: 180px; }
+.filters input[type="number"] { width: 92px; }
+.filters input[type="date"] { width: 132px; }
+.filters select { width: 96px; }
+.filter-count { color: var(--muted); font-size: 12px; margin-left: auto; }
+
 .results { max-height: 560px; overflow: auto; border: 1px solid var(--line); border-radius: 10px; }
 .results:empty { display: none; }
 
