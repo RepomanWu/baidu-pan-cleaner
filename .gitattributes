@@ -1,3 +1,0 @@
-# Windows 批处理必须以 CRLF 原样保存，避免 clone/zip 后变成 LF 导致 cmd 解析异常
-*.bat -text
-*.cmd -text
