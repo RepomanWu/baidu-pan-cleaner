@@ -204,6 +204,21 @@ function allPathsOfReport(report) {
   return set;
 }
 
+function aliveFilesOf(group, deletedBefore) {
+  return (group.files || []).filter((file) => file.path && !file.deleted && !deletedBefore.has(file.path));
+}
+
+// 重复组内只剩一份时，这一份必须保留，否则整组会被删空
+function protectedPathsOfReport(report, deletedBefore) {
+  const set = new Set();
+  if (report.type !== 'dup') return set;
+  for (const group of report.groups || []) {
+    const alive = aliveFilesOf(group, deletedBefore);
+    if (alive.length <= 1) for (const file of alive) set.add(file.path);
+  }
+  return set;
+}
+
 function toCSV(report) {
   const rows = [['类型', '路径', '大小(字节)', '修改时间', '重复组']];
   const fmt = (ts) => (ts ? new Date(ts * 1000).toLocaleString('zh-CN') : '');
@@ -319,6 +334,26 @@ async function handleApi(req, res, url) {
     const pending = paths.filter((p) => !deletedBefore.has(p));
     if (!pending.length) return sendJSON(res, 400, { error: '所选文件之前已经删除过，无需重复删除' });
 
+    if (report.type === 'dup') {
+      const protectedSet = protectedPathsOfReport(report, deletedBefore);
+      const hitProtected = pending.filter((p) => protectedSet.has(p));
+      if (hitProtected.length) {
+        return sendJSON(res, 400, {
+          error: `有 ${hitProtected.length} 个文件是所在重复组的最后一个副本，已阻止删除（每组至少保留一份）`,
+        });
+      }
+      const pendingSet = new Set(pending);
+      const emptied = (report.groups || []).find((group) => {
+        const alive = aliveFilesOf(group, deletedBefore);
+        return alive.length > 1 && alive.every((file) => pendingSet.has(file.path));
+      });
+      if (emptied) {
+        return sendJSON(res, 400, {
+          error: `重复组「${emptied.group || '未命名'}」的副本会被全部删除，已阻止操作（每组至少保留一份），请取消勾选其中一个`,
+        });
+      }
+    }
+
     const job = startJob('delete', { accountId: account.id, type: report.type }, (j) =>
       runDelete(account, report, pending, j)
     );
@@ -384,6 +419,16 @@ async function handleApi(req, res, url) {
       report.suggested = report.suggested.filter((filePath) => !deletedSet.has(filePath));
       report.meta = { ...(report.meta || {}), previouslyDeleted: marked };
     }
+    // 组内只剩一个副本时自动保护，导入后也不会被勾选删除
+    store.protectLastCopies(report);
+    const protectedCount =
+      report.type === 'dup'
+        ? (report.groups || []).reduce(
+            (sum, group) => sum + (group.files || []).filter((file) => file.protected).length,
+            0
+          )
+        : 0;
+    if (protectedCount) report.meta = { ...(report.meta || {}), protectedCount };
     store.saveReport(report);
     return sendJSON(res, 200, {
       report: {
