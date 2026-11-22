@@ -173,13 +173,14 @@ async function loginAccount(accountId) {
   try {
     const data = await api(`/api/accounts/${accountId}/login`, { method: 'POST' });
     watchJob(data.jobId, {
-      title: '等待扫码授权',
+      title: '扫码授权',
       onDone: async (job) => {
         await loadAccounts();
-        toast(job.status === 'done' ? '授权成功，可以开始扫描了' : `授权失败：${job.error}`, job.status !== 'done');
+        if (job.status === 'done') toast('授权成功，可以开始扫描了');
+        else toast(`授权失败：${job.error}`, true);
       },
     });
-    toast('已打开浏览器窗口，请扫码登录', false);
+    toast('授权窗口已打开，请用百度网盘 App 扫码（窗口可能在浏览器后面）', false);
   } catch (err) {
     toast(err.message, true);
   }
