@@ -35,17 +35,30 @@ function errorText(errno) {
     '-9': '文件不存在或已被删除',
     105: '文件不存在或已被删除',
     31066: '文件不存在或已被删除',
+    114: '百度暂时拒绝删除（errno=114，通常是操作频繁或文件状态变化），稍后重试即可',
   };
   return map[String(errno)] || `接口返回错误（errno=${errno}）`;
 }
 
 const MISSING_CODES = new Set(['12', '-9', '105', '31066']);
+// 114：百度侧的临时拒绝（常见于连续删除过久/过于频繁），不是登录或参数问题
+const TRANSIENT_CODES = new Set(['114', '31034', '-1']);
+const AUTH_CODES = new Set(['104', '-6', '4', '31045']);
 
 // 文件在网盘上已经不存在（常见于扫描后又被手动删除），此时应直接按已删除记录
 function isMissingError(err) {
   if (!err) return false;
   if (err.code !== undefined && err.code !== null && MISSING_CODES.has(String(err.code))) return true;
   return /不存在|已被删除|已删除|not\s*exist|no\s*such/i.test(err.message || '');
+}
+
+function verifyRequiredError() {
+  const err = new PanError(
+    '百度要求完成身份验证：已为你打开网盘页面，请在页面里手动删除任意一个文件并按其提示完成验证，然后回到工具重试',
+    132
+  );
+  err.verifyNeeded = true;
+  return err;
 }
 
 function preferredChannel() {
@@ -70,9 +83,11 @@ function deleteBatchOptions() {
   const cfg = readConfig();
   const batch = Number(process.env.DELETE_BATCH || cfg.deleteBatch) || 10;
   const delay = Number(process.env.DELETE_DELAY || cfg.deleteDelay);
+  const retry = Number(process.env.DELETE_RETRY_DELAY || cfg.deleteRetryDelay);
   return {
     batchSize: Math.max(1, Math.min(50, Math.floor(batch))),
     delayMs: Number.isFinite(delay) && delay >= 0 ? delay : 1200,
+    retryDelayMs: Number.isFinite(retry) && retry >= 0 ? retry : 4000,
   };
 }
 
@@ -375,7 +390,8 @@ class Session {
         err.code === 7001 ||
         err.code === 2 ||
         err.code === 132 ||
-        isMissingError(err)
+        isMissingError(err) ||
+        TRANSIENT_CODES.has(String(err.code))
       ) {
         onProgress && onProgress({ status: 'running', progress: 2 });
         return this.deleteViaFileManager(paths, onProgress);
@@ -422,14 +438,21 @@ class Session {
   async waitFileDelete(taskid) {
     const deadline = Date.now() + 5 * 60 * 1000;
     while (Date.now() < deadline) {
-      const q = await this.api(
-        `/share/taskquery?taskid=${encodeURIComponent(taskid)}&clienttype=0&app_id=250528&web=1`
-      );
-      if (q.status === 'success') return true;
-      if (q.status === 'failed') return false;
+      let q;
+      try {
+        q = await this.api(
+          `/share/taskquery?taskid=${encodeURIComponent(taskid)}&clienttype=0&app_id=250528&web=1`
+        );
+      } catch (err) {
+        if (err.code === 132 || AUTH_CODES.has(String(err.code))) throw err;
+        // 任务查询异常（例如 errno=114 任务已失效）：交给逐条核对，不要中断整批删除
+        return 'unknown';
+      }
+      if (q.status === 'success') return 'success';
+      if (q.status === 'failed') return 'failed';
       await sleep(1000);
     }
-    return false;
+    return 'unknown';
   }
 
   // 逐个重试：区分「文件已不存在」与真正的失败，已不存在的按已删除记录
@@ -437,8 +460,8 @@ class Session {
     for (const filePath of chunk) {
       try {
         const res = await this.submitFileDelete([filePath]);
-        const ok = res.taskid ? await this.waitFileDelete(res.taskid) : true;
-        if (ok) {
+        const status = res.taskid ? await this.waitFileDelete(res.taskid) : 'success';
+        if (status === 'success') {
           state.deleted++;
           state.deletedPaths.push(filePath);
         } else {
@@ -446,23 +469,18 @@ class Session {
         }
       } catch (err) {
         if (err.code === 132) {
-          if (!state.deleted) {
-            const verifyError = new PanError(
-              '百度要求完成身份验证：已为你打开网盘页面，请在页面里手动删除任意一个文件并按其提示完成验证，然后回到工具重试',
-              132
-            );
-            verifyError.verifyNeeded = true;
-            throw verifyError;
-          }
+          if (!state.deleted) throw verifyRequiredError();
           state.verifyNeeded = true;
           return;
         }
+        if (AUTH_CODES.has(String(err.code))) throw err;
         if (isMissingError(err)) {
           state.deleted++;
           state.missing++;
           state.deletedPaths.push(filePath);
         } else {
           state.failed++;
+          state.lastError = err.message;
         }
       }
       await sleep(Math.min(300, delayMs));
@@ -470,34 +488,69 @@ class Session {
   }
 
   async deleteViaFileManager(paths, onProgress) {
-    const { batchSize, delayMs } = deleteBatchOptions();
-    const state = { deleted: 0, failed: 0, missing: 0, deletedPaths: [], verifyNeeded: false };
+    const { batchSize, delayMs, retryDelayMs } = deleteBatchOptions();
+    const state = {
+      deleted: 0,
+      failed: 0,
+      missing: 0,
+      deletedPaths: [],
+      verifyNeeded: false,
+      stopped: false,
+      lastError: null,
+    };
+    let emptyBatches = 0;
+
+    const runBatch = async (chunk) => {
+      const res = await this.submitFileDelete(chunk);
+      if (!res.taskid) return 'success';
+      return this.waitFileDelete(res.taskid);
+    };
+
     for (let i = 0; i < paths.length; i += batchSize) {
       const chunk = paths.slice(i, i + batchSize);
+      const before = state.deleted;
       try {
-        const res = await this.submitFileDelete(chunk);
-        const ok = res.taskid ? await this.waitFileDelete(res.taskid) : true;
-        if (ok) {
+        const status = await runBatch(chunk);
+        if (status === 'success') {
           state.deleted += chunk.length;
           state.deletedPaths.push(...chunk);
         } else {
-          // 批次失败时逐条核对，已经删掉/不存在的不会重复报错
+          // 任务失败/查询不到时逐条核对，已经删掉/不存在的不会重复报错
           await this.deleteIndividually(chunk, state, delayMs);
         }
       } catch (err) {
         if (err.code === 132) {
-          // 已删掉一部分时不再整体报错，把进度交给上层记录，剩余部分验证后重试
-          if (!state.deleted) {
-            const verifyError = new PanError(
-              '百度要求完成身份验证：已为你打开网盘页面，请在页面里手动删除任意一个文件并按其提示完成验证，然后回到工具重试',
-              132
-            );
-            verifyError.verifyNeeded = true;
-            throw verifyError;
-          }
+          if (!state.deleted) throw verifyRequiredError();
           state.verifyNeeded = true;
+        } else if (AUTH_CODES.has(String(err.code))) {
+          throw err;
         } else if (isMissingError(err)) {
           await this.deleteIndividually(chunk, state, delayMs);
+        } else if (TRANSIENT_CODES.has(String(err.code))) {
+          // 百度临时拒绝（如 errno=114）：暂停几秒后重试这一批，仍不行就计入失败继续
+          state.lastError = err.message;
+          await sleep(retryDelayMs + Math.round(Math.random() * 1000));
+          try {
+            const status = await runBatch(chunk);
+            if (status === 'success') {
+              state.deleted += chunk.length;
+              state.deletedPaths.push(...chunk);
+            } else {
+              await this.deleteIndividually(chunk, state, delayMs);
+            }
+          } catch (err2) {
+            if (err2.code === 132) {
+              if (!state.deleted) throw verifyRequiredError();
+              state.verifyNeeded = true;
+            } else if (AUTH_CODES.has(String(err2.code))) {
+              throw err2;
+            } else if (isMissingError(err2)) {
+              await this.deleteIndividually(chunk, state, delayMs);
+            } else {
+              state.failed += chunk.length;
+              state.lastError = err2.message;
+            }
+          }
         } else {
           throw err;
         }
@@ -512,9 +565,18 @@ class Session {
             : `已删除 ${state.deleted} / ${paths.length} 项`,
         });
       if (state.verifyNeeded) break;
+      // 连续 3 个批次都没删掉任何文件，多半是被限流了：先停下，保留已删记录
+      if (state.deleted === before) emptyBatches++;
+      else emptyBatches = 0;
+      if (emptyBatches >= 3) {
+        state.stopped = true;
+        break;
+      }
       if (i + batchSize < paths.length) await sleep(delayMs + Math.round(Math.random() * 800));
     }
-    if (!state.deleted && state.failed) throw new PanError('删除失败，请稍后重试或在网页版手动删除');
+    if (!state.deleted && (state.failed || state.stopped)) {
+      throw new PanError(state.lastError || '删除失败，请稍后重试或在网页版手动删除');
+    }
     if (state.verifyNeeded) {
       return {
         deleted: state.deleted,
@@ -523,6 +585,18 @@ class Session {
         deletedPaths: state.deletedPaths,
         missing: state.missing,
         verifyNeeded: true,
+        remaining: paths.length - state.deleted,
+      };
+    }
+    if (state.stopped) {
+      return {
+        deleted: state.deleted,
+        failed: paths.length - state.deleted,
+        method: 'filemanager',
+        deletedPaths: state.deletedPaths,
+        missing: state.missing,
+        stopped: true,
+        stopReason: state.lastError || '百度连续拒绝删除',
         remaining: paths.length - state.deleted,
       };
     }
