@@ -165,13 +165,14 @@ async function runDelete(account, report, paths, job) {
     try {
       if (!session) throw new pan.PanError('账号未登录或登录已失效，请先扫码授权');
       jobs.update(job.id, { stage: '提交删除任务', progress: 8 });
-      await session.deleteFiles(report.type, report.taskid, paths, (p) => {
+      const result = await session.deleteFiles(report.type, report.taskid, paths, (p) => {
         jobs.update(job.id, {
           stage: p.status === 'running' ? '删除中' : p.status,
           progress: Math.min(95, 10 + Math.round((Number(p.progress) || 0) * 0.85)),
+          message: p.message || '',
         });
       });
-      return { deleted: paths.length, reportId: report.id, type: report.type };
+      return { ...result, reportId: report.id, type: report.type };
     } finally {
       try {
         await context.close();
