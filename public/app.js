@@ -632,7 +632,10 @@ async function deleteSelected() {
       title: `删除${report.typeLabel}`,
       onDone: async (job) => {
         if (job.status === 'done') {
-          toast(`已删除 ${job.result.deleted} 项，建议重新扫描确认`);
+          const deleted = Number(job.result.deleted) || 0;
+          const failed = Number(job.result.failed) || 0;
+          const via = job.result.method === 'filemanager' ? '（普通删除，已放入回收站）' : '';
+          toast(`已删除 ${deleted} 项${failed ? `，${failed} 项失败` : ''}${via}，建议重新扫描确认`);
           state.selected = new Set();
           await loadReports();
           clearReport();
