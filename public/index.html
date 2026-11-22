@@ -87,6 +87,19 @@
             <option value="selected">已勾选</option>
             <option value="unselected">未勾选</option>
           </select>
+          <select id="fSort" class="sort-select" title="排序方式">
+            <option value="">默认顺序</option>
+            <option value="mtime-desc">修改时间 新→旧</option>
+            <option value="mtime-asc">修改时间 旧→新</option>
+            <option value="size-desc">大小 大→小</option>
+            <option value="size-asc">大小 小→大</option>
+            <option value="path-asc">路径 A→Z</option>
+            <option value="path-desc">路径 Z→A</option>
+            <option value="count-desc" data-dup="1">组内文件数 多→少</option>
+            <option value="count-asc" data-dup="1">组内文件数 少→多</option>
+            <option value="groupsize-desc" data-dup="1">组占用 大→小</option>
+            <option value="groupsize-asc" data-dup="1">组占用 小→大</option>
+          </select>
           <button id="btnSelectFiltered" class="btn sm" type="button">勾选筛选结果</button>
           <button id="btnFilterReset" class="btn sm ghost" type="button">重置筛选</button>
           <span id="filterCount" class="filter-count"></span>
@@ -111,6 +124,7 @@
   <div id="toast" class="toast"></div>
 
   <script src="/importer.js"></script>
+  <script src="/sorter.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>
