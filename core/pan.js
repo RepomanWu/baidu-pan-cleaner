@@ -31,8 +31,21 @@ function errorText(errno) {
     '-6': '登录状态已失效，请重新扫码授权',
     2: '请求参数有误或登录状态异常，请重新授权后重试',
     4: '登录状态已失效，请重新扫码授权',
+    12: '文件不存在或已被删除',
+    '-9': '文件不存在或已被删除',
+    105: '文件不存在或已被删除',
+    31066: '文件不存在或已被删除',
   };
   return map[String(errno)] || `接口返回错误（errno=${errno}）`;
+}
+
+const MISSING_CODES = new Set(['12', '-9', '105', '31066']);
+
+// 文件在网盘上已经不存在（常见于扫描后又被手动删除），此时应直接按已删除记录
+function isMissingError(err) {
+  if (!err) return false;
+  if (err.code !== undefined && err.code !== null && MISSING_CODES.has(String(err.code))) return true;
+  return /不存在|已被删除|已删除|not\s*exist|no\s*such/i.test(err.message || '');
 }
 
 function preferredChannel() {
@@ -355,8 +368,15 @@ class Session {
       await this.deleteViaGarbage(type, taskid, paths, onProgress);
       return { deleted: paths.length, failed: 0, method: 'garbage', deletedPaths: paths };
     } catch (err) {
-      // 131/7002：清理功能的删除受会员限制；132：触发身份验证，都改走普通文件删除
-      if (err.code === 131 || err.code === 7002 || err.code === 7001 || err.code === 2 || err.code === 132) {
+      // 131/7002：清理功能的删除受会员限制；132：触发身份验证；文件已不存在：都改走普通文件删除
+      if (
+        err.code === 131 ||
+        err.code === 7002 ||
+        err.code === 7001 ||
+        err.code === 2 ||
+        err.code === 132 ||
+        isMissingError(err)
+      ) {
         onProgress && onProgress({ status: 'running', progress: 2 });
         return this.deleteViaFileManager(paths, onProgress);
       }
@@ -370,7 +390,7 @@ class Session {
       form: { type, taskid, filelist: JSON.stringify(paths) },
     });
     const deleteId = res.delete_id;
-    if (!deleteId) throw new PanError('删除任务创建失败');
+    if (!deleteId) throw new PanError('删除任务创建失败', 2);
     const deadline = Date.now() + 30 * 60 * 1000;
     while (Date.now() < deadline) {
       const q = await this.api(
@@ -379,83 +399,143 @@ class Session {
       const status = q.status;
       onProgress && onProgress({ status, progress: Number(q.progress) || 0 });
       if (status === 'success') return q;
-      if (status === 'failed') throw new PanError('删除失败，请重试');
+      // 清理任务失败（常见原因是文件已被删掉）：交给普通删除逐条核对
+      if (status === 'failed') throw new PanError('清理删除任务失败，改为普通删除重试', 2);
       await sleep(1500);
     }
-    throw new PanError('删除超时（30 分钟）');
+    throw new PanError('删除超时（30 分钟）', 2);
+  }
+
+  fileManagerQuery() {
+    return `async=2&onnest=fail&opera=delete&newVerify=1&clienttype=0&app_id=250528&web=1&bdstoken=${encodeURIComponent(
+      this.bdstoken || ''
+    )}`;
+  }
+
+  async submitFileDelete(chunk) {
+    return this.api(`/api/filemanager?${this.fileManagerQuery()}`, {
+      method: 'POST',
+      form: { filelist: JSON.stringify(chunk) },
+    });
+  }
+
+  async waitFileDelete(taskid) {
+    const deadline = Date.now() + 5 * 60 * 1000;
+    while (Date.now() < deadline) {
+      const q = await this.api(
+        `/share/taskquery?taskid=${encodeURIComponent(taskid)}&clienttype=0&app_id=250528&web=1`
+      );
+      if (q.status === 'success') return true;
+      if (q.status === 'failed') return false;
+      await sleep(1000);
+    }
+    return false;
+  }
+
+  // 逐个重试：区分「文件已不存在」与真正的失败，已不存在的按已删除记录
+  async deleteIndividually(chunk, state, delayMs) {
+    for (const filePath of chunk) {
+      try {
+        const res = await this.submitFileDelete([filePath]);
+        const ok = res.taskid ? await this.waitFileDelete(res.taskid) : true;
+        if (ok) {
+          state.deleted++;
+          state.deletedPaths.push(filePath);
+        } else {
+          state.failed++;
+        }
+      } catch (err) {
+        if (err.code === 132) {
+          if (!state.deleted) {
+            const verifyError = new PanError(
+              '百度要求完成身份验证：已为你打开网盘页面，请在页面里手动删除任意一个文件并按其提示完成验证，然后回到工具重试',
+              132
+            );
+            verifyError.verifyNeeded = true;
+            throw verifyError;
+          }
+          state.verifyNeeded = true;
+          return;
+        }
+        if (isMissingError(err)) {
+          state.deleted++;
+          state.missing++;
+          state.deletedPaths.push(filePath);
+        } else {
+          state.failed++;
+        }
+      }
+      await sleep(Math.min(300, delayMs));
+    }
   }
 
   async deleteViaFileManager(paths, onProgress) {
     const { batchSize, delayMs } = deleteBatchOptions();
-    let deleted = 0;
-    let failed = 0;
-    const deletedPaths = [];
-    const query = `async=2&onnest=fail&opera=delete&newVerify=1&clienttype=0&app_id=250528&web=1&bdstoken=${encodeURIComponent(
-      this.bdstoken || ''
-    )}`;
+    const state = { deleted: 0, failed: 0, missing: 0, deletedPaths: [], verifyNeeded: false };
     for (let i = 0; i < paths.length; i += batchSize) {
       const chunk = paths.slice(i, i + batchSize);
-      let res;
       try {
-        res = await this.api(`/api/filemanager?${query}`, {
-          method: 'POST',
-          form: { filelist: JSON.stringify(chunk) },
-        });
+        const res = await this.submitFileDelete(chunk);
+        const ok = res.taskid ? await this.waitFileDelete(res.taskid) : true;
+        if (ok) {
+          state.deleted += chunk.length;
+          state.deletedPaths.push(...chunk);
+        } else {
+          // 批次失败时逐条核对，已经删掉/不存在的不会重复报错
+          await this.deleteIndividually(chunk, state, delayMs);
+        }
       } catch (err) {
         if (err.code === 132) {
           // 已删掉一部分时不再整体报错，把进度交给上层记录，剩余部分验证后重试
-          if (deleted) {
-            return {
-              deleted,
-              failed: paths.length - deleted,
-              method: 'filemanager',
-              deletedPaths,
-              verifyNeeded: true,
-              remaining: paths.length - deleted,
-            };
+          if (!state.deleted) {
+            const verifyError = new PanError(
+              '百度要求完成身份验证：已为你打开网盘页面，请在页面里手动删除任意一个文件并按其提示完成验证，然后回到工具重试',
+              132
+            );
+            verifyError.verifyNeeded = true;
+            throw verifyError;
           }
-          const verifyError = new PanError(
-            '百度要求完成身份验证：已为你打开网盘页面，请在页面里手动删除任意一个文件并按其提示完成验证，然后回到工具重试',
-            132
-          );
-          verifyError.verifyNeeded = true;
-          throw verifyError;
-        }
-        throw err;
-      }
-      if (res.taskid) {
-        const deadline = Date.now() + 5 * 60 * 1000;
-        let status = '';
-        while (Date.now() < deadline) {
-          const q = await this.api(
-            `/share/taskquery?taskid=${encodeURIComponent(res.taskid)}&clienttype=0&app_id=250528&web=1`
-          );
-          status = q.status;
-          if (status === 'success' || status === 'failed') break;
-          await sleep(1000);
-        }
-        if (status !== 'success') {
-          failed += chunk.length;
+          state.verifyNeeded = true;
+        } else if (isMissingError(err)) {
+          await this.deleteIndividually(chunk, state, delayMs);
         } else {
-          deleted += chunk.length;
-          deletedPaths.push(...chunk);
+          throw err;
         }
-      } else {
-        deleted += chunk.length;
-        deletedPaths.push(...chunk);
       }
       onProgress &&
         onProgress({
           status: 'running',
-          progress: Math.round((deleted / paths.length) * 100),
+          progress: Math.round((state.deleted / paths.length) * 100),
           method: 'filemanager',
-          message: `已删除 ${deleted} / ${paths.length} 项`,
+          message: state.missing
+            ? `已处理 ${state.deleted} / ${paths.length} 项（其中 ${state.missing} 项此前已不存在）`
+            : `已删除 ${state.deleted} / ${paths.length} 项`,
         });
+      if (state.verifyNeeded) break;
       if (i + batchSize < paths.length) await sleep(delayMs + Math.round(Math.random() * 800));
     }
-    if (!deleted && failed) throw new PanError('删除失败，请稍后重试或在网页版手动删除');
-    if (failed && onProgress) onProgress({ status: 'running', progress: 100, message: `有 ${failed} 项删除失败` });
-    return { deleted, failed, method: 'filemanager', deletedPaths };
+    if (!state.deleted && state.failed) throw new PanError('删除失败，请稍后重试或在网页版手动删除');
+    if (state.verifyNeeded) {
+      return {
+        deleted: state.deleted,
+        failed: paths.length - state.deleted,
+        method: 'filemanager',
+        deletedPaths: state.deletedPaths,
+        missing: state.missing,
+        verifyNeeded: true,
+        remaining: paths.length - state.deleted,
+      };
+    }
+    if (state.failed && onProgress) {
+      onProgress({ status: 'running', progress: 100, message: `有 ${state.failed} 项删除失败` });
+    }
+    return {
+      deleted: state.deleted,
+      failed: state.failed,
+      method: 'filemanager',
+      deletedPaths: state.deletedPaths,
+      missing: state.missing,
+    };
   }
 
   async close() {
