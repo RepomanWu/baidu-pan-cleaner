@@ -173,6 +173,10 @@ async function runDelete(account, report, paths, job) {
           message: p.message || '',
         });
       });
+      if (result && Array.isArray(result.deletedPaths) && result.deletedPaths.length) {
+        store.markReportDeleted(report.id, result.deletedPaths);
+        store.markDeleted(account.id, result.deletedPaths);
+      }
       return { ...result, reportId: report.id, type: report.type };
     } catch (err) {
       verifyNeeded = !!err.verifyNeeded;
@@ -311,11 +315,14 @@ async function handleApi(req, res, url) {
         error: `有 ${illegal.length} 个路径不在当前报告中（报告可能已过期或被重新扫描），请重新打开报告后再试`,
       });
     }
+    const deletedBefore = store.deletedPathsFor(account.id);
+    const pending = paths.filter((p) => !deletedBefore.has(p));
+    if (!pending.length) return sendJSON(res, 400, { error: '所选文件之前已经删除过，无需重复删除' });
 
     const job = startJob('delete', { accountId: account.id, type: report.type }, (j) =>
-      runDelete(account, report, paths, j)
+      runDelete(account, report, pending, j)
     );
-    return sendJSON(res, 200, { jobId: job.id, count: paths.length });
+    return sendJSON(res, 200, { jobId: job.id, count: pending.length, skipped: paths.length - pending.length });
   }
 
   if (pathname === '/api/jobs' && method === 'GET') {
@@ -358,6 +365,25 @@ async function handleApi(req, res, url) {
       createdAt: Number(incoming.createdAt) || Date.now(),
       suggested: Array.isArray(incoming.suggested) ? incoming.suggested : [],
     };
+
+    // 用本地删除记录标注历史已删除的文件，避免导入后又去删一遍
+    const deletedSet = store.deletedPathsFor(account.id);
+    if (deletedSet.size) {
+      let marked = 0;
+      const applyDeleted = (file) => {
+        if (file && deletedSet.has(file.path)) {
+          if (!file.deleted) marked++;
+          file.deleted = true;
+        }
+      };
+      if (report.type === 'dup') {
+        for (const group of report.groups || []) (group.files || []).forEach(applyDeleted);
+      } else {
+        (report.files || []).forEach(applyDeleted);
+      }
+      report.suggested = report.suggested.filter((filePath) => !deletedSet.has(filePath));
+      report.meta = { ...(report.meta || {}), previouslyDeleted: marked };
+    }
     store.saveReport(report);
     return sendJSON(res, 200, {
       report: {
