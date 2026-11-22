@@ -335,7 +335,7 @@ class Session {
   async deleteFiles(type, taskid, paths, onProgress) {
     try {
       await this.deleteViaGarbage(type, taskid, paths, onProgress);
-      return { deleted: paths.length, failed: 0, method: 'garbage' };
+      return { deleted: paths.length, failed: 0, method: 'garbage', deletedPaths: paths };
     } catch (err) {
       // 131/7002：清理功能的删除受会员限制；132：触发身份验证，都改走普通文件删除
       if (err.code === 131 || err.code === 7002 || err.code === 7001 || err.code === 2 || err.code === 132) {
@@ -371,6 +371,7 @@ class Session {
     const chunkSize = 200;
     let deleted = 0;
     let failed = 0;
+    const deletedPaths = [];
     for (let i = 0; i < paths.length; i += chunkSize) {
       const chunk = paths.slice(i, i + chunkSize);
       const query = `async=2&onnest=fail&opera=delete&newVerify=1&clienttype=0&app_id=250528&web=1&bdstoken=${encodeURIComponent(
@@ -409,12 +410,13 @@ class Session {
         }
       }
       deleted += chunk.length;
+      deletedPaths.push(...chunk);
       onProgress &&
         onProgress({ status: 'running', progress: Math.round((deleted / paths.length) * 100), method: 'filemanager' });
     }
     if (!deleted && failed) throw new PanError('删除失败，请稍后重试或在网页版手动删除');
     if (failed && onProgress) onProgress({ status: 'running', progress: 100, message: `有 ${failed} 项删除失败` });
-    return { deleted, failed, method: 'filemanager' };
+    return { deleted, failed, method: 'filemanager', deletedPaths };
   }
 
   async close() {
