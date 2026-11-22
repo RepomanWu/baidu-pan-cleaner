@@ -162,6 +162,7 @@ async function runDelete(account, report, paths, job) {
   return withLock(account.id, async () => {
     jobs.update(job.id, { stage: '打开浏览器会话', progress: 3 });
     const { context, session } = await pan.openSession(account);
+    let verifyNeeded = false;
     try {
       if (!session) throw new pan.PanError('账号未登录或登录已失效，请先扫码授权');
       jobs.update(job.id, { stage: '提交删除任务', progress: 8 });
@@ -173,10 +174,16 @@ async function runDelete(account, report, paths, job) {
         });
       });
       return { ...result, reportId: report.id, type: report.type };
+    } catch (err) {
+      verifyNeeded = !!err.verifyNeeded;
+      throw err;
     } finally {
       try {
         await context.close();
       } catch (e) {}
+      if (verifyNeeded) {
+        pan.openBrowserWindow(account.profileDir, 'https://pan.baidu.com/disk/main');
+      }
     }
   });
 }
