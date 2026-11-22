@@ -3,11 +3,17 @@ chcp 65001 >nul
 title Baidu Pan Cleaner
 cd /d "%~dp0"
 
+rem If node is not on PATH, try common install locations
+if exist "%ProgramFiles%\nodejs\node.exe" set "PATH=%ProgramFiles%\nodejs;%PATH%"
+if exist "%LOCALAPPDATA%\Programs\nodejs\node.exe" set "PATH=%LOCALAPPDATA%\Programs\nodejs;%PATH%"
+if exist "%USERPROFILE%\.trae-cn\sdks\versions\node\current\node.exe" set "PATH=%USERPROFILE%\.trae-cn\sdks\versions\node\current;%PATH%"
+
 where node >nul 2>nul
 if errorlevel 1 (
-  echo [ERROR] Node.js not found. Please install Node.js 18+ : https://nodejs.org
-  start "" "https://nodejs.org/en/download"
+  echo [ERROR] Node.js not found.
+  echo Please install Node.js 18+ from https://nodejs.org and run this file again.
   pause
+  start "" "https://nodejs.org/en/download"
   exit /b 1
 )
 
