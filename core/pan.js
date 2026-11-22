@@ -29,7 +29,7 @@ function errorText(errno) {
     102: '无权限操作该目录',
     104: '登录凭证无效，请重新扫码授权',
     '-6': '登录状态已失效，请重新扫码授权',
-    2: '登录状态已失效，请重新扫码授权',
+    2: '请求参数有误或登录状态异常，请重新授权后重试',
     4: '登录状态已失效，请重新扫码授权',
   };
   return map[String(errno)] || `接口返回错误（errno=${errno}）`;
@@ -70,7 +70,11 @@ async function launchBrowser(profileDir, { visible = false } = {}) {
       lastError = err;
     }
   }
-  throw new PanError(`无法启动浏览器（已尝试 ${channels.join(' / ')}）：${lastError ? lastError.message : '未知错误'}`);
+  const lastMessage = lastError ? lastError.message || String(lastError) : '未知错误';
+  if (/另一个会话|ProcessSingleton|SingletonLock|profile.*in use/i.test(lastMessage)) {
+    throw new PanError('浏览器配置目录被占用（可能有残留的授权窗口），请关闭后重试');
+  }
+  throw new PanError(`无法启动浏览器（已尝试 ${channels.join(' / ')}）：${lastMessage}`);
 }
 
 function withTimeout(promise, ms, message) {
@@ -218,6 +222,20 @@ class Session {
   }
 
   async deleteFiles(type, taskid, paths, onProgress) {
+    try {
+      await this.deleteViaGarbage(type, taskid, paths, onProgress);
+      return { deleted: paths.length, failed: 0, method: 'garbage' };
+    } catch (err) {
+      // 131/7002：清理功能的删除受会员限制，改用普通文件删除（所有账号可用，进回收站）
+      if (err.code === 131 || err.code === 7002 || err.code === 7001 || err.code === 2) {
+        onProgress && onProgress({ status: 'running', progress: 2 });
+        return this.deleteViaFileManager(paths, onProgress);
+      }
+      throw err;
+    }
+  }
+
+  async deleteViaGarbage(type, taskid, paths, onProgress) {
     const res = await this.api(`/api/garbagedelete?${this.params()}`, {
       method: 'POST',
       form: { type, taskid, filelist: JSON.stringify(paths) },
@@ -236,6 +254,44 @@ class Session {
       await sleep(1500);
     }
     throw new PanError('删除超时（30 分钟）');
+  }
+
+  async deleteViaFileManager(paths, onProgress) {
+    const chunkSize = 200;
+    let deleted = 0;
+    let failed = 0;
+    for (let i = 0; i < paths.length; i += chunkSize) {
+      const chunk = paths.slice(i, i + chunkSize);
+      const query = `async=2&onnest=fail&opera=delete&newVerify=1&clienttype=0&app_id=250528&web=1&bdstoken=${encodeURIComponent(
+        this.bdstoken || ''
+      )}`;
+      const res = await this.api(`/api/filemanager?${query}`, {
+        method: 'POST',
+        form: { filelist: JSON.stringify(chunk) },
+      });
+      if (res.taskid) {
+        const deadline = Date.now() + 5 * 60 * 1000;
+        let status = '';
+        while (Date.now() < deadline) {
+          const q = await this.api(
+            `/share/taskquery?taskid=${encodeURIComponent(res.taskid)}&clienttype=0&app_id=250528&web=1`
+          );
+          status = q.status;
+          if (status === 'success' || status === 'failed') break;
+          await sleep(1000);
+        }
+        if (status !== 'success') {
+          failed += chunk.length;
+          continue;
+        }
+      }
+      deleted += chunk.length;
+      onProgress &&
+        onProgress({ status: 'running', progress: Math.round((deleted / paths.length) * 100), method: 'filemanager' });
+    }
+    if (!deleted && failed) throw new PanError('删除失败，请稍后重试或在网页版手动删除');
+    if (failed && onProgress) onProgress({ status: 'running', progress: 100, message: `有 ${failed} 项删除失败` });
+    return { deleted, failed, method: 'filemanager' };
   }
 
   async close() {
