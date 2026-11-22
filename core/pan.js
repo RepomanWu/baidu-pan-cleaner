@@ -35,13 +35,24 @@ function errorText(errno) {
   return map[String(errno)] || `接口返回错误（errno=${errno}）`;
 }
 
+function preferredChannel() {
+  if (process.env.PAN_BROWSER) return String(process.env.PAN_BROWSER);
+  try {
+    const file = path.join(__dirname, '..', 'data', 'config.json');
+    const cfg = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
+    if (cfg && cfg.browser) return String(cfg.browser);
+  } catch (e) {}
+  return 'msedge';
+}
+
 async function launchBrowser(profileDir, { visible = false } = {}) {
   fs.mkdirSync(profileDir, { recursive: true });
   const args = ['--no-first-run', '--no-default-browser-check', '--disable-blink-features=AutomationControlled'];
   if (visible) args.push('--start-maximized', '--new-window');
   else args.push('--window-position=-32000,-32000', '--window-size=1280,900');
 
-  const channels = [process.env.PAN_BROWSER, 'chrome', 'msedge'].filter((value, index, list) => value && list.indexOf(value) === index);
+  const preferred = preferredChannel();
+  const channels = [preferred, 'msedge', 'chrome'].filter((value, index, list) => value && list.indexOf(value) === index);
   let lastError = null;
   for (const channel of channels) {
     try {
