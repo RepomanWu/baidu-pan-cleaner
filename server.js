@@ -240,9 +240,13 @@ async function handleApi(req, res, url) {
     }
 
     if (method === 'POST' && action === '/login') {
-      const job = startJob('login', { accountId: account.id }, () =>
+      jobs.cancelRunning('login', account.id);
+      const job = startJob('login', { accountId: account.id }, (j) =>
         withLock(account.id, async () => {
-          const info = await pan.login(account);
+          const info = await pan.login(account, {
+            onStage: (stage) => jobs.update(j.id, { stage, message: '' }),
+            shouldStop: () => j.cancelled === true,
+          });
           store.updateAccount(account.id, { uk: info.uk, lastLoginAt: Date.now() });
           return { uk: info.uk };
         })
@@ -251,8 +255,9 @@ async function handleApi(req, res, url) {
     }
 
     if (method === 'POST' && action === '/check') {
-      const job = startJob('check', { accountId: account.id }, () =>
+      const job = startJob('check', { accountId: account.id }, (j) =>
         withLock(account.id, async () => {
+          jobs.update(j.id, { stage: '检测登录状态' });
           const { context, session } = await pan.openSession(account);
           try {
             if (!session) return { loggedIn: false };
