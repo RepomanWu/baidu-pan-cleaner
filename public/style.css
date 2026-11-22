@@ -237,6 +237,11 @@ button { font-family: inherit; cursor: pointer; }
   padding: 2px 7px;
   flex: 0 0 auto;
 }
+.tag.warn { color: #b26a00; background: #fff4e0; }
+.row.protected { background: #fffdf7; }
+.row.protected .path { color: #8a6d3b; }
+.row.protected input[type="checkbox"] { opacity: .45; cursor: not-allowed; }
+.group-head.protected { color: #b26a00; background: #fff8ec; }
 
 .report-item {
   display: flex;
