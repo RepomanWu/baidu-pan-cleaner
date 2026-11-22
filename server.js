@@ -52,7 +52,7 @@ function readBody(req) {
     req.on('data', (chunk) => {
       chunks.push(chunk);
       size += chunk.length;
-      if (size > 20 * 1024 * 1024) {
+      if (size > 80 * 1024 * 1024) {
         reject(new Error('请求体过大'));
         req.destroy();
       }
@@ -293,6 +293,7 @@ async function handleApi(req, res, url) {
     if (!account) return sendJSON(res, 404, { error: '账号不存在' });
     const report = store.getReport(String(body.reportId || ''));
     if (!report || report.accountId !== account.id) return sendJSON(res, 404, { error: '报告不存在' });
+    if (!report.taskid) return sendJSON(res, 400, { error: '该报告没有扫描任务 ID（CSV 导入），无法删除，只能查看或导出' });
     const allowed = allPathsOfReport(report);
     const paths = (Array.isArray(body.paths) ? body.paths : []).filter((p) => typeof p === 'string');
     if (!paths.length) return sendJSON(res, 400, { error: '没有选择要删除的文件' });
@@ -322,6 +323,46 @@ async function handleApi(req, res, url) {
 
   if (pathname === '/api/reports' && method === 'GET') {
     return sendJSON(res, 200, { reports: store.listReports(searchParams.get('accountId') || '') });
+  }
+
+  if (pathname === '/api/reports/import' && method === 'POST') {
+    const body = await readBody(req);
+    const incoming = body.report;
+    if (!incoming || typeof incoming !== 'object' || !VALID_TYPES.has(incoming.type)) {
+      return sendJSON(res, 400, { error: '报告格式不正确，需要本工具导出的 JSON 或 CSV' });
+    }
+    const account = store.getAccount(String(body.accountId || incoming.accountId || ''));
+    if (!account) return sendJSON(res, 404, { error: '账号不存在，请先在左侧添加账号' });
+    const rows = incoming.type === 'dup' ? incoming.groups : incoming.files;
+    if (!Array.isArray(rows)) return sendJSON(res, 400, { error: '报告缺少结果数据，可能不是本工具导出的文件' });
+
+    const now = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+    const report = {
+      ...incoming,
+      id: `${account.id}-${incoming.type}-${stamp}-${Math.random().toString(36).slice(2, 6)}`,
+      accountId: account.id,
+      accountName: account.name,
+      uk: incoming.uk || account.uk || '',
+      taskid: incoming.taskid || null,
+      imported: true,
+      createdAt: Number(incoming.createdAt) || Date.now(),
+      suggested: Array.isArray(incoming.suggested) ? incoming.suggested : [],
+    };
+    store.saveReport(report);
+    return sendJSON(res, 200, {
+      report: {
+        id: report.id,
+        type: report.type,
+        typeLabel: report.typeLabel,
+        createdAt: report.createdAt,
+        summary: report.summary,
+        suggestedCount: report.suggested.length,
+        imported: true,
+        hasTask: !!report.taskid,
+      },
+    });
   }
 
   const reportMatch = pathname.match(/^\/api\/reports\/([a-zA-Z0-9_-]+)(\/download)?$/);
