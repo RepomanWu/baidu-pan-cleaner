@@ -100,6 +100,8 @@ function listReports(accountId) {
       createdAt: data.createdAt,
       summary: data.summary,
       suggestedCount: (data.suggested || []).length,
+      imported: !!data.imported,
+      hasTask: !!data.taskid,
     };
   });
   return reports
