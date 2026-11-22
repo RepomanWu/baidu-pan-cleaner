@@ -69,6 +69,22 @@ function killProfileBrowsers(profileDir) {
   } catch (e) {}
 }
 
+function openBrowserWindow(profileDir, url) {
+  if (process.platform !== 'win32') return;
+  const candidates = [
+    `${process.env['ProgramFiles(x86)'] || ''}\\Microsoft\\Edge\\Application\\msedge.exe`,
+    `${process.env.ProgramFiles || ''}\\Microsoft\\Edge\\Application\\msedge.exe`,
+    `${process.env.ProgramFiles || ''}\\Google\\Chrome\\Application\\chrome.exe`,
+  ];
+  const exe = candidates.find((candidate) => candidate && fs.existsSync(candidate));
+  if (!exe) return;
+  try {
+    require('child_process')
+      .spawn(exe, [`--user-data-dir=${profileDir}`, '--new-window', url], { detached: true, stdio: 'ignore' })
+      .unref();
+  } catch (e) {}
+}
+
 async function launchBrowser(profileDir, { visible = false } = {}) {
   fs.mkdirSync(profileDir, { recursive: true });
   const args = ['--no-first-run', '--no-default-browser-check', '--disable-blink-features=AutomationControlled'];
@@ -269,8 +285,8 @@ class Session {
       await this.deleteViaGarbage(type, taskid, paths, onProgress);
       return { deleted: paths.length, failed: 0, method: 'garbage' };
     } catch (err) {
-      // 131/7002：清理功能的删除受会员限制，改用普通文件删除（所有账号可用，进回收站）
-      if (err.code === 131 || err.code === 7002 || err.code === 7001 || err.code === 2) {
+      // 131/7002：清理功能的删除受会员限制；132：触发身份验证，都改走普通文件删除
+      if (err.code === 131 || err.code === 7002 || err.code === 7001 || err.code === 2 || err.code === 132) {
         onProgress && onProgress({ status: 'running', progress: 2 });
         return this.deleteViaFileManager(paths, onProgress);
       }
@@ -308,10 +324,22 @@ class Session {
       const query = `async=2&onnest=fail&opera=delete&newVerify=1&clienttype=0&app_id=250528&web=1&bdstoken=${encodeURIComponent(
         this.bdstoken || ''
       )}`;
-      const res = await this.api(`/api/filemanager?${query}`, {
-        method: 'POST',
-        form: { filelist: JSON.stringify(chunk) },
-      });
+      let res;
+      try {
+        res = await this.api(`/api/filemanager?${query}`, {
+          method: 'POST',
+          form: { filelist: JSON.stringify(chunk) },
+        });
+      } catch (err) {
+        if (err.code === 132) {
+          const verifyError = new PanError(
+            '百度要求完成身份验证：已为你打开网盘页面，请在页面里手动删除任意一个文件并按其提示完成验证，然后回到工具重试'
+          );
+          verifyError.verifyNeeded = true;
+          throw verifyError;
+        }
+        throw err;
+      }
       if (res.taskid) {
         const deadline = Date.now() + 5 * 60 * 1000;
         let status = '';
@@ -353,7 +381,9 @@ async function openSession(account, { visible = false } = {}) {
   if (!info.uk) {
     return { context, page, session: null };
   }
-  return { context, page, session: new Session(context, page, info) };
+  const session = new Session(context, page, info);
+  session.profileDir = account.profileDir;
+  return { context, page, session };
 }
 
 async function login(account, { timeoutMs = 10 * 60 * 1000, onStage, shouldStop } = {}) {
@@ -492,6 +522,7 @@ module.exports = {
   Session,
   login,
   openSession,
+  openBrowserWindow,
   buildReport,
   sleep,
 };
