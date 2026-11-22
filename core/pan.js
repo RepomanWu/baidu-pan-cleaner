@@ -69,6 +69,55 @@ function killProfileBrowsers(profileDir) {
   } catch (e) {}
 }
 
+let cachedScreen = null;
+function getScreenSize() {
+  if (cachedScreen) return cachedScreen;
+  try {
+    const out = require('child_process')
+      .execFileSync(
+        'powershell',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          'Add-Type -AssemblyName System.Windows.Forms; $w=[System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea; "$($w.Width)x$($w.Height)"',
+        ],
+        { windowsHide: true, timeout: 8000 }
+      )
+      .toString()
+      .trim();
+    const match = out.match(/(\d+)x(\d+)/);
+    if (match) cachedScreen = { width: Number(match[1]), height: Number(match[2]) };
+  } catch (e) {}
+  return cachedScreen || { width: 1366, height: 768 };
+}
+
+function centeredWindowArgs() {
+  const screen = getScreenSize();
+  const width = Math.max(900, Math.min(1280, screen.width - 100));
+  const height = Math.max(640, Math.min(900, screen.height - 100));
+  const x = Math.max(0, Math.round((screen.width - width) / 2));
+  const y = Math.max(0, Math.round((screen.height - height) / 2));
+  return [`--window-size=${width},${height}`, `--window-position=${x},${y}`];
+}
+
+async function centerBrowserWindow(context, page) {
+  try {
+    const screen = getScreenSize();
+    const width = Math.max(900, Math.min(1200, screen.width - 120));
+    const height = Math.max(600, Math.min(820, screen.height - 120));
+    const left = Math.max(0, Math.round((screen.width - width) / 2));
+    const top = Math.max(0, Math.round((screen.height - height) / 2));
+    const cdp = await context.newCDPSession(page);
+    const info = await cdp.send('Browser.getWindowForTarget');
+    await cdp.send('Browser.setWindowBounds', {
+      windowId: info.windowId,
+      bounds: { left, top, width, height, windowState: 'normal' },
+    });
+    await cdp.detach().catch(() => {});
+  } catch (e) {}
+}
+
 function openBrowserWindow(profileDir, url) {
   if (process.platform !== 'win32') return;
   const candidates = [
@@ -80,7 +129,10 @@ function openBrowserWindow(profileDir, url) {
   if (!exe) return;
   try {
     require('child_process')
-      .spawn(exe, [`--user-data-dir=${profileDir}`, '--new-window', url], { detached: true, stdio: 'ignore' })
+      .spawn(exe, [`--user-data-dir=${profileDir}`, '--new-window', ...centeredWindowArgs(), url], {
+        detached: true,
+        stdio: 'ignore',
+      })
       .unref();
   } catch (e) {}
 }
@@ -88,7 +140,7 @@ function openBrowserWindow(profileDir, url) {
 async function launchBrowser(profileDir, { visible = false } = {}) {
   fs.mkdirSync(profileDir, { recursive: true });
   const args = ['--no-first-run', '--no-default-browser-check', '--disable-blink-features=AutomationControlled'];
-  if (visible) args.push('--start-maximized', '--new-window');
+  if (visible) args.push('--new-window', ...centeredWindowArgs());
   else args.push('--window-position=-32000,-32000', '--window-size=1280,900');
 
   const preferred = preferredChannel();
@@ -376,6 +428,7 @@ async function openSession(account, { visible = false } = {}) {
   const context = await launchBrowser(account.profileDir, { visible });
   const page = context.pages()[0] || (await context.newPage());
   page.setDefaultTimeout(60000);
+  if (visible) await centerBrowserWindow(context, page);
   await page.goto(CLEAR_URL, { waitUntil: 'domcontentloaded' });
   const info = await readSession(page);
   if (!info.uk) {
@@ -399,6 +452,7 @@ async function login(account, { timeoutMs = 10 * 60 * 1000, onStage, shouldStop 
   try {
     const page = context.pages()[0] || (await context.newPage());
     page.setDefaultTimeout(30000);
+    await centerBrowserWindow(context, page);
     await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded' }).catch(() => {});
     await page.bringToFront().catch(() => {});
 
