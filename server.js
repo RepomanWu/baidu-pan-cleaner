@@ -177,6 +177,8 @@ async function runDelete(account, report, paths, job) {
         store.markReportDeleted(report.id, result.deletedPaths);
         store.markDeleted(account.id, result.deletedPaths);
       }
+      // 分批删除中途触发身份验证：已删的部分已记录，剩余部分需要验证后重试
+      if (result && result.verifyNeeded) verifyNeeded = true;
       return { ...result, reportId: report.id, type: report.type };
     } catch (err) {
       verifyNeeded = !!err.verifyNeeded;
