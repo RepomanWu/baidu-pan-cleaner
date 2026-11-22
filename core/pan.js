@@ -37,18 +37,37 @@ function errorText(errno) {
 
 async function launchBrowser(profileDir, { visible = false } = {}) {
   fs.mkdirSync(profileDir, { recursive: true });
-  const args = [
-    '--no-first-run',
-    '--no-default-browser-check',
-    '--disable-blink-features=AutomationControlled',
-  ];
-  if (!visible) args.push('--window-position=-32000,-32000', '--window-size=1280,900');
-  return chromium.launchPersistentContext(profileDir, {
-    channel: 'chrome',
-    headless: false,
-    viewport: visible ? undefined : { width: 1280, height: 900 },
-    args,
+  const args = ['--no-first-run', '--no-default-browser-check', '--disable-blink-features=AutomationControlled'];
+  if (visible) args.push('--start-maximized', '--new-window');
+  else args.push('--window-position=-32000,-32000', '--window-size=1280,900');
+
+  const channels = [process.env.PAN_BROWSER, 'chrome', 'msedge'].filter((value, index, list) => value && list.indexOf(value) === index);
+  let lastError = null;
+  for (const channel of channels) {
+    try {
+      return await withTimeout(
+        chromium.launchPersistentContext(profileDir, {
+          channel,
+          headless: false,
+          viewport: visible ? undefined : { width: 1280, height: 900 },
+          args,
+        }),
+        60000,
+        '启动浏览器超时'
+      );
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw new PanError(`无法启动浏览器（已尝试 ${channels.join(' / ')}）：${lastError ? lastError.message : '未知错误'}`);
+}
+
+function withTimeout(promise, ms, message) {
+  let timer = null;
+  const timeout = new Promise((resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
   });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 async function readSession(page) {
@@ -227,18 +246,49 @@ async function openSession(account, { visible = false } = {}) {
   return { context, page, session: new Session(context, page, info) };
 }
 
-async function login(account, { timeoutMs = 10 * 60 * 1000 } = {}) {
+async function login(account, { timeoutMs = 10 * 60 * 1000, onStage, shouldStop } = {}) {
+  const stage = (text) => onStage && onStage(text);
+  stage('正在打开授权窗口');
+  // 上一次授权窗口刚关闭时，Chrome 进程可能还没完全退出，稍等一下避免复用同一个配置目录冲突
+  await sleep(700);
   const context = await launchBrowser(account.profileDir, { visible: true });
+  let userClosed = false;
+  context.on('close', () => {
+    userClosed = true;
+  });
   try {
     const page = context.pages()[0] || (await context.newPage());
-    await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded' });
+    page.setDefaultTimeout(30000);
+    await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded' }).catch(() => {});
+    await page.bringToFront().catch(() => {});
+
+    let info = await readSession(page);
+    if (!info.uk) {
+      // 登录页默认是官网落地页，需要点「去登录」才会弹出二维码
+      stage('等待扫码授权');
+      const entry = page.getByRole('button', { name: '去登录' });
+      const entryCount = await entry.count().catch(() => 0);
+      if (entryCount > 0) {
+        await entry.first().click({ timeout: 8000 }).catch(() => {});
+        await sleep(1200);
+      }
+      await page.bringToFront().catch(() => {});
+    }
+
     const deadline = Date.now() + timeoutMs;
+    const launchedAt = Date.now();
     while (Date.now() < deadline) {
-      const info = await readSession(page);
+      if (shouldStop && shouldStop()) throw new PanError('授权已取消');
+      // 刚启动的窗口可能还在初始化，给 3 秒缓冲再判断是否被关闭
+      if (Date.now() - launchedAt > 3000 && (userClosed || context.pages().length === 0)) {
+        throw new PanError('授权窗口已关闭，请重新点击「扫码授权」');
+      }
+      info = await readSession(page);
       if (info.uk) {
+        stage('授权成功');
         return info;
       }
-      await sleep(2000);
+      await sleep(1500);
     }
     throw new PanError('等待扫码登录超时，请重试');
   } finally {
