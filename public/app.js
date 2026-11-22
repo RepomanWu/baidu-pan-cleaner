@@ -766,7 +766,14 @@ async function deleteSelected() {
           const deleted = Number(job.result.deleted) || 0;
           const failed = Number(job.result.failed) || 0;
           const via = job.result.method === 'filemanager' ? '（普通删除，已放入回收站）' : '';
-          toast(`已删除 ${deleted} 项${failed ? `，${failed} 项失败` : ''}${via}，建议重新扫描确认`);
+          if (job.result.verifyNeeded) {
+            toast(
+              `已删除 ${deleted} 项，剩余 ${failed} 项触发百度身份验证：请在刚打开的网盘页面完成验证后，重新打开报告再删除剩余项`,
+              true
+            );
+          } else {
+            toast(`已删除 ${deleted} 项${failed ? `，${failed} 项失败` : ''}${via}，建议重新扫描确认`);
+          }
           state.selected = new Set();
           await loadReports();
           clearReport();
