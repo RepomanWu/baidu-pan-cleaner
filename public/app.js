@@ -773,6 +773,11 @@ async function deleteSelected() {
               `已删除 ${deleted} 项${missingNote}，剩余 ${failed} 项触发百度身份验证：请在刚打开的网盘页面完成验证后，重新打开报告再删除剩余项`,
               true
             );
+          } else if (job.result.stopped) {
+            toast(
+              `已删除 ${deleted} 项${missingNote}，百度暂时限制继续删除（${job.result.stopReason || '接口拒绝'}），请等几分钟后重新打开报告删除剩余 ${failed} 项`,
+              true
+            );
           } else {
             toast(`已删除 ${deleted} 项${failed ? `，${failed} 项失败` : ''}${missingNote}${via}，建议重新扫描确认`);
           }
