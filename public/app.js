@@ -539,14 +539,32 @@ function renderReport() {
 function selectFiltered() {
   if (!state.report) return;
   const view = filteredView();
-  const paths = view.groups.length
-    ? view.groups.flatMap((group) =>
-        group.files.filter((file) => !file.deleted && !file.protected).map((file) => file.path)
-      )
-    : view.files.filter((file) => !file.deleted && !file.protected).map((file) => file.path);
+  const paths = [];
+  let keptGroups = 0;
+  if (view.groups.length) {
+    // 重复文件：每组只勾选较旧的副本，保留最新一份不勾选，避免整组被删空
+    for (const group of view.groups) {
+      const candidates = group.files.filter((file) => !file.deleted && !file.protected);
+      if (!candidates.length) continue;
+      let keep = null;
+      if (candidates.length > 1) {
+        keep = candidates.reduce((a, b) => ((b.mtime || 0) > (a.mtime || 0) ? b : a), candidates[0]);
+        keptGroups++;
+      }
+      for (const file of candidates) if (file !== keep) paths.push(file.path);
+    }
+  } else {
+    for (const file of view.files) {
+      if (!file.deleted && !file.protected) paths.push(file.path);
+    }
+  }
   for (const path of paths) state.selected.add(path);
   refreshCheckboxes();
-  toast(`已勾选筛选结果 ${paths.length} 项`);
+  toast(
+    keptGroups
+      ? `已勾选筛选结果 ${paths.length} 项，${keptGroups} 个重复组各保留最新 1 项未勾选`
+      : `已勾选筛选结果 ${paths.length} 项`
+  );
 }
 
 function renderRow(file) {
