@@ -70,8 +70,8 @@ function preferredChannel() {
 
 function readConfig() {
   try {
-    const file = path.join(__dirname, '..', 'data', 'config.json');
-    const cfg = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
+    const dataDir = process.env.BDPAN_DATA_DIR || path.join(__dirname, '..', 'data');
+    const cfg = JSON.parse(fs.readFileSync(path.join(dataDir, 'config.json'), 'utf8').replace(/^\uFEFF/, ''));
     return cfg && typeof cfg === 'object' ? cfg : {};
   } catch (e) {
     return {};
@@ -92,27 +92,64 @@ function deleteBatchOptions() {
 }
 
 function clearProfileLock(profileDir) {
-  for (const name of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) {
+  for (const name of ['SingletonLock', 'SingletonSocket', 'SingletonCookie', 'lockfile']) {
     try {
-      fs.rmSync(path.join(profileDir, name), { force: true });
+      fs.rmSync(path.join(profileDir, name), { force: true, recursive: true });
     } catch (e) {}
   }
 }
 
-function killProfileBrowsers(profileDir) {
+// 从 SingletonLock 里读出占用者 PID 直接结束，能处理命令行匹配不到的情况
+function killLockOwner(profileDir) {
+  if (process.platform !== 'win32') return;
+  try {
+    const raw = fs.readFileSync(path.join(profileDir, 'SingletonLock'), 'utf8');
+    const pid = Number(String(raw).trim().split('-').pop());
+    if (Number.isInteger(pid) && pid > 0) {
+      require('child_process').execFileSync(
+        'powershell',
+        ['-NoProfile', '-NonInteractive', '-Command', `Stop-Process -Id ${pid} -Force -ErrorAction SilentlyContinue`],
+        { windowsHide: true, stdio: 'ignore', timeout: 10000 }
+      );
+    }
+  } catch (e) {}
+}
+
+async function killProfileBrowsers(profileDir) {
   if (process.platform !== 'win32') return;
   const escaped = String(profileDir).replace(/'/g, "''");
-  const script =
-    `Get-CimInstance Win32_Process -Filter "Name='msedge.exe' or Name='chrome.exe'" | ` +
-    `Where-Object { $_.CommandLine -like '*${escaped}*' } | ` +
-    `ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`;
-  try {
-    require('child_process').execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
-      windowsHide: true,
-      stdio: 'ignore',
-      timeout: 15000,
-    });
-  } catch (e) {}
+  const query =
+    `(Get-CimInstance Win32_Process -Filter "Name='msedge.exe' or Name='chrome.exe'" | ` +
+    `Where-Object { $_.CommandLine -like '*${escaped}*' }).ProcessId -join ','`;
+  // 反复确认进程真的退出了，避免刚 Stop-Process 就立刻重启浏览器导致仍被占用
+  for (let round = 0; round < 6; round++) {
+    let out = '';
+    try {
+      out = require('child_process')
+        .execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', query], {
+          windowsHide: true,
+          stdio: ['ignore', 'pipe', 'ignore'],
+          timeout: 15000,
+        })
+        .toString()
+        .trim();
+    } catch (e) {
+      out = '';
+    }
+    const pids = out
+      .split(',')
+      .map((value) => Number(value.trim()))
+      .filter((pid) => Number.isInteger(pid) && pid > 0);
+    if (!pids.length) return;
+    try {
+      require('child_process').execFileSync(
+        'powershell',
+        ['-NoProfile', '-NonInteractive', '-Command', pids.map((pid) => `Stop-Process -Id ${pid} -Force -ErrorAction SilentlyContinue`).join('; ')],
+        { windowsHide: true, stdio: 'ignore', timeout: 15000 }
+      );
+    } catch (e) {}
+    await sleep(500);
+  }
 }
 
 let cachedScreen = null;
@@ -185,6 +222,13 @@ function openBrowserWindow(profileDir, url) {
 
 async function launchBrowser(profileDir, { visible = false } = {}) {
   fs.mkdirSync(profileDir, { recursive: true });
+  try {
+    const probe = path.join(profileDir, '.write-test');
+    fs.writeFileSync(probe, 'ok');
+    fs.rmSync(probe, { force: true });
+  } catch (err) {
+    throw new PanError(`浏览器配置目录不可写（${profileDir}）：${err.message}`);
+  }
   const args = ['--no-first-run', '--no-default-browser-check', '--disable-blink-features=AutomationControlled'];
   if (visible) args.push('--new-window', ...centeredWindowArgs());
   else args.push('--window-position=-32000,-32000', '--window-size=1280,900');
@@ -213,25 +257,40 @@ async function launchBrowser(profileDir, { visible = false } = {}) {
     throw lastError || new Error('未知错误');
   };
 
-  try {
-    return await attempt();
-  } catch (firstError) {
-    // 常见原因：上次授权窗口未关闭 / Chrome 崩溃残留锁，清理后重试一次
-    killProfileBrowsers(profileDir);
+  // 上次授权/验证窗口可能还占着这个配置目录，先主动清理，避免首次启动就失败
+  const lockNames = ['SingletonLock', 'SingletonSocket', 'SingletonCookie', 'lockfile'];
+  if (lockNames.some((name) => fs.existsSync(path.join(profileDir, name)))) {
+    killLockOwner(profileDir);
+    await killProfileBrowsers(profileDir);
     clearProfileLock(profileDir);
-    await sleep(1200);
+    await sleep(600);
+  }
+
+  let lastError = null;
+  for (let round = 1; round <= 3; round++) {
     try {
       return await attempt();
-    } catch (secondError) {
-      killProfileBrowsers(profileDir);
+    } catch (err) {
+      lastError = err;
+      if (round === 3) break;
+      // 常见原因：上次授权/验证窗口未关闭、Chrome 崩溃残留锁
+      killLockOwner(profileDir);
+      await killProfileBrowsers(profileDir);
       clearProfileLock(profileDir);
-      const message = (secondError && secondError.message) || String(secondError);
-      if (/Target page, context or browser has been closed|已在另一个会话|ProcessSingleton/i.test(message)) {
-        throw new PanError('授权用的浏览器窗口被占用，已自动清理但未能启动，请稍后重试');
-      }
-      throw new PanError(`无法启动浏览器（已尝试 ${channels.join(' / ')}）：${message.slice(0, 300)}`);
+      await sleep(round === 1 ? 900 : 2500);
     }
   }
+
+  killLockOwner(profileDir);
+  await killProfileBrowsers(profileDir);
+  clearProfileLock(profileDir);
+  const message = (lastError && lastError.message) || String(lastError || '未知错误');
+  if (/Target page, context or browser has been closed|已在另一个会话|ProcessSingleton|already in use/i.test(message)) {
+    throw new PanError(
+      `授权用的浏览器配置被占用：工具已自动关闭残留窗口仍无法启动。请手动关闭任务栏里由本工具打开的 Edge/Chrome 窗口（可能显示为普通浏览器窗口），稍等片刻再试；仍不行就重启电脑后重试（详情：${message.split('\n')[0].slice(0, 200)}）`
+    );
+  }
+  throw new PanError(`无法启动浏览器（已尝试 ${channels.join(' / ')}）：${message.slice(0, 300)}`);
 }
 
 function withTimeout(promise, ms, message) {
