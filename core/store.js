@@ -9,6 +9,7 @@ const DATA_DIR = path.join(ROOT, 'data');
 const PROFILE_DIR = path.join(DATA_DIR, 'profiles');
 const REPORT_DIR = path.join(DATA_DIR, 'reports');
 const ACCOUNT_FILE = path.join(DATA_DIR, 'accounts.json');
+const LEDGER_FILE = path.join(DATA_DIR, 'deleted.json');
 
 function ensureDirs() {
   fs.mkdirSync(PROFILE_DIR, { recursive: true });
@@ -125,6 +126,46 @@ function removeReport(id) {
   }
 }
 
+function loadLedger() {
+  const data = readJSON(LEDGER_FILE, {});
+  return data && typeof data === 'object' ? data : {};
+}
+
+function markDeleted(accountId, paths) {
+  if (!accountId || !Array.isArray(paths) || !paths.length) return;
+  const ledger = loadLedger();
+  const bucket = ledger[accountId] || (ledger[accountId] = {});
+  const now = Date.now();
+  for (const filePath of paths) bucket[filePath] = now;
+  writeJSON(LEDGER_FILE, ledger);
+}
+
+function deletedPathsFor(accountId) {
+  const bucket = loadLedger()[accountId] || {};
+  return new Set(Object.keys(bucket));
+}
+
+function markReportDeleted(reportId, paths) {
+  const report = getReport(reportId);
+  if (!report || !Array.isArray(paths) || !paths.length) return null;
+  const deleted = new Set(paths);
+  const now = Date.now();
+  const apply = (file) => {
+    if (file && deleted.has(file.path)) {
+      file.deleted = true;
+      file.deletedAt = now;
+    }
+  };
+  if (report.type === 'dup') {
+    for (const group of report.groups || []) (group.files || []).forEach(apply);
+  } else {
+    (report.files || []).forEach(apply);
+  }
+  report.suggested = (report.suggested || []).filter((filePath) => !deleted.has(filePath));
+  saveReport(report);
+  return report;
+}
+
 module.exports = {
   DATA_DIR,
   ensureDirs,
@@ -137,4 +178,7 @@ module.exports = {
   listReports,
   getReport,
   removeReport,
+  markDeleted,
+  deletedPathsFor,
+  markReportDeleted,
 };
