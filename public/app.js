@@ -323,7 +323,13 @@ function renderReports() {
     const main = el('div', 'main');
     main.appendChild(el('div', '', `${report.typeLabel} · ${report.summary.count} 项 · ${fmtSize(report.summary.size)}`));
     main.appendChild(
-      el('div', 'sub', `${new Date(report.createdAt).toLocaleString('zh-CN')} · 建议可删 ${report.suggestedCount} 项`)
+      el(
+        'div',
+        'sub',
+        `${new Date(report.createdAt).toLocaleString('zh-CN')} · 建议可删 ${report.suggestedCount} 项` +
+          (report.imported ? ' · 导入' : '') +
+          (report.hasTask === false ? ' · 不可删除' : '')
+      )
     );
     row.appendChild(main);
     const openBtn = el('button', 'btn sm', '查看');
@@ -340,6 +346,7 @@ function clearReport() {
   state.selected = new Set();
   $('#resultArea').innerHTML = '';
   $('#reportMeta').textContent = '还没有选择结果。';
+  $('#filterCount').textContent = '';
   updateDeleteButton();
 }
 
@@ -348,6 +355,57 @@ async function openReport(reportId) {
   state.report = data.report;
   state.selected = new Set(state.report.suggested || []);
   renderReport();
+}
+
+function readFilters() {
+  const num = (sel) => {
+    const value = parseFloat($(sel).value);
+    return Number.isFinite(value) ? value : null;
+  };
+  const dayStart = (value) => (value ? new Date(`${value}T00:00:00`).getTime() / 1000 : null);
+  const dayEnd = (value) => (value ? new Date(`${value}T23:59:59`).getTime() / 1000 : null);
+  const minSize = num('#fMinSize');
+  const maxSize = num('#fMaxSize');
+  return {
+    keyword: $('#fKeyword').value.trim().toLowerCase(),
+    minSize: minSize == null ? null : minSize * 1024 * 1024,
+    maxSize: maxSize == null ? null : maxSize * 1024 * 1024,
+    from: dayStart($('#fFrom').value),
+    to: dayEnd($('#fTo').value),
+    groupMin: parseInt($('#fGroupMin').value, 10) || 0,
+    sel: $('#fSel').value,
+  };
+}
+
+function matchFile(file, filters) {
+  if (filters.keyword && !String(file.path || '').toLowerCase().includes(filters.keyword)) return false;
+  if (filters.minSize != null && file.size < filters.minSize) return false;
+  if (filters.maxSize != null && file.size > filters.maxSize) return false;
+  if (filters.from != null && file.mtime && file.mtime < filters.from) return false;
+  if (filters.to != null && file.mtime && file.mtime > filters.to) return false;
+  if (filters.sel === 'selected' && !state.selected.has(file.path)) return false;
+  if (filters.sel === 'unselected' && state.selected.has(file.path)) return false;
+  return true;
+}
+
+function filteredView() {
+  const report = state.report;
+  if (!report) return { groups: [], files: [], matched: 0, total: 0 };
+  const filters = readFilters();
+  if (report.type === 'dup') {
+    const groups = [];
+    let matched = 0;
+    for (const group of report.groups || []) {
+      if (filters.groupMin && group.files.length < filters.groupMin) continue;
+      const files = group.files.filter((file) => matchFile(file, filters));
+      if (!files.length) continue;
+      groups.push({ group: group.group, files, total: group.files.length });
+      matched += files.length;
+    }
+    return { groups, files: [], matched, total: report.summary.count };
+  }
+  const files = (report.files || []).filter((file) => matchFile(file, filters));
+  return { groups: [], files, matched: files.length, total: report.summary.count };
 }
 
 function renderReport() {
@@ -362,7 +420,8 @@ function renderReport() {
     'div',
     '',
     `${report.typeLabel} · 共 ${report.summary.count} 项 · 占用 ${fmtSize(report.summary.size)}` +
-      (report.type === 'dup' ? ` · ${report.summary.groupCount} 组重复` : '')
+      (report.type === 'dup' ? ` · ${report.summary.groupCount} 组重复` : '') +
+      (report.imported ? ' · 导入的报告' : '')
   );
   const line2 = el('div', '', `账号：${report.accountName}（UID ${report.uk || '-'}）· 扫描时间：${new Date(report.createdAt).toLocaleString('zh-CN')}`);
   meta.append(line1, line2);
@@ -380,23 +439,29 @@ function renderReport() {
       el('div', 'warn', '结果数量过多，本报告只包含已加载的部分（可用环境变量 MAX_ITEMS 调大上限后重新扫描）。')
     );
   }
+  if (!report.taskid) {
+    meta.appendChild(el('div', 'warn', '该报告没有扫描任务 ID（CSV 导入），只能查看和导出，无法从这里删除。'));
+  }
   if (report.type === 'dup') {
     meta.appendChild(el('div', 'warn', '默认每组只勾选「保留最新一份」之外的文件；删除前请再核对。'));
   }
 
   if (!report.summary.count) {
     area.appendChild(el('div', 'empty', '没有扫描到可清理的内容'));
+    $('#filterCount').textContent = '';
     updateDeleteButton();
     return;
   }
 
+  const view = filteredView();
+  $('#filterCount').textContent = `筛选后 ${view.matched} 项 / 共 ${view.total} 项`;
+
   const RENDER_LIMIT = 1500;
   let rendered = 0;
   if (report.type === 'dup') {
-    for (const group of report.groups || []) {
+    for (const group of view.groups) {
       if (rendered >= RENDER_LIMIT) break;
-      const head = el('div', 'group-head', `重复组 ${group.group} · ${group.files.length} 个文件`);
-      area.appendChild(head);
+      area.appendChild(el('div', 'group-head', `重复组 ${group.group} · 匹配 ${group.files.length} / 共 ${group.total} 个文件`));
       for (const file of group.files) {
         if (rendered >= RENDER_LIMIT) break;
         area.appendChild(renderRow(file));
@@ -404,25 +469,34 @@ function renderReport() {
       }
     }
   } else {
-    for (const file of report.files || []) {
+    for (const file of view.files) {
       if (rendered >= RENDER_LIMIT) break;
       area.appendChild(renderRow(file));
       rendered++;
     }
   }
-  if (rendered >= RENDER_LIMIT) {
+  if (!view.matched) {
+    area.appendChild(el('div', 'empty', '当前筛选条件下没有匹配项'));
+  } else if (rendered >= RENDER_LIMIT) {
     area.appendChild(el('div', 'empty', `仅显示前 ${RENDER_LIMIT} 项，完整数据请导出 CSV 查看`));
   }
-  if (state.selected.size > rendered) {
-    const note = el(
-      'div',
-      'empty',
-      `当前已选中 ${state.selected.size} 项，其中 ${state.selected.size - rendered} 项未显示在列表中（包括整组自动勾选的项）。`
-    );
+  if (state.selected.size > rendered && view.matched > rendered) {
+    const note = el('div', 'empty', `当前已选中 ${state.selected.size} 项，其中 ${state.selected.size - rendered} 项未显示在列表中。`);
     note.style.color = '#b3261e';
     area.appendChild(note);
   }
   updateDeleteButton();
+}
+
+function selectFiltered() {
+  if (!state.report) return;
+  const view = filteredView();
+  const paths = view.groups.length
+    ? view.groups.flatMap((group) => group.files.map((file) => file.path))
+    : view.files.map((file) => file.path);
+  for (const path of paths) state.selected.add(path);
+  refreshCheckboxes();
+  toast(`已勾选筛选结果 ${paths.length} 项`);
 }
 
 function renderRow(file) {
@@ -446,8 +520,10 @@ function renderRow(file) {
 function updateDeleteButton() {
   const btn = $('#btnDelete');
   const count = state.selected.size;
-  btn.disabled = count === 0 || !state.report;
+  const hasTask = !!(state.report && state.report.taskid);
+  btn.disabled = count === 0 || !state.report || !hasTask;
   btn.textContent = count ? `删除选中（${count}）` : '删除选中';
+  btn.title = hasTask ? '' : '导入的 CSV 报告没有扫描任务 ID，只能查看和导出';
 }
 
 function selectSuggested() {
@@ -468,6 +544,12 @@ function refreshCheckboxes() {
     if (pathNode && box) box.checked = state.selected.has(pathNode.textContent);
   });
   updateDeleteButton();
+}
+
+/* ---------- 导入报告 ---------- */
+
+function reportFromCsv(text, account) {
+  return window.PanImporter.reportFromCsv(text, account);
 }
 
 /* ---------- 删除 ---------- */
@@ -637,6 +719,39 @@ function bindEvents() {
   $('#btnDownloadJson').addEventListener('click', () => {
     if (state.report) window.open(`/api/reports/${state.report.id}/download?format=json`, '_blank');
   });
+
+  $('#btnImport').addEventListener('click', () => $('#importInput').click());
+  $('#importInput').addEventListener('change', async (event) => {
+    const file = event.target.files && event.target.files[0];
+    event.target.value = '';
+    if (!file) return;
+    try {
+      await importReportFile(file);
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  const filterIds = ['#fKeyword', '#fMinSize', '#fMaxSize', '#fFrom', '#fTo', '#fGroupMin', '#fSel'];
+  let filterTimer = null;
+  filterIds.forEach((id) => {
+    const node = $(id);
+    const handler = () => {
+      clearTimeout(filterTimer);
+      filterTimer = setTimeout(() => {
+        if (state.report) renderReport();
+      }, 250);
+    };
+    node.addEventListener('input', handler);
+    node.addEventListener('change', handler);
+  });
+  $('#btnFilterReset').addEventListener('click', () => {
+    filterIds.forEach((id) => {
+      $(id).value = '';
+    });
+    if (state.report) renderReport();
+  });
+  $('#btnSelectFiltered').addEventListener('click', selectFiltered);
 }
 
 async function init() {
