@@ -408,6 +408,10 @@ function filteredView() {
   return { groups: [], files, matched: files.length, total: report.summary.count };
 }
 
+function applySort(view, sort) {
+  return window.PanSorter.applySort(view, sort, state.report ? state.report.type : '');
+}
+
 function renderReport() {
   const report = state.report;
   const area = $('#resultArea');
@@ -453,7 +457,12 @@ function renderReport() {
     return;
   }
 
-  const view = filteredView();
+  const isDup = report.type === 'dup';
+  document.querySelectorAll('#fSort option[data-dup]').forEach((option) => {
+    option.disabled = !isDup;
+    if (!isDup && $('#fSort').value === option.value) $('#fSort').value = '';
+  });
+  const view = applySort(filteredView(), $('#fSort').value);
   $('#filterCount').textContent = `筛选后 ${view.matched} 项 / 共 ${view.total} 项`;
 
   const RENDER_LIMIT = 1500;
@@ -732,7 +741,7 @@ function bindEvents() {
     }
   });
 
-  const filterIds = ['#fKeyword', '#fMinSize', '#fMaxSize', '#fFrom', '#fTo', '#fGroupMin', '#fSel'];
+  const filterIds = ['#fKeyword', '#fMinSize', '#fMaxSize', '#fFrom', '#fTo', '#fGroupMin', '#fSel', '#fSort'];
   let filterTimer = null;
   filterIds.forEach((id) => {
     const node = $(id);
